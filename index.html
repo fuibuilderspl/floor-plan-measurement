@@ -438,8 +438,11 @@
       <div class="secbody">
         <div class="row"><span class="pill unset" id="scalePill">scale not set</span></div>
         <button class="btn teal wide" id="addRef">+ Draw reference line</button>
+        <button class="btn wide" id="scanDims" disabled>🔍 Scan plan for dimensions (OCR)</button>
+        <div class="note" id="scanNote" style="display:none"></div>
+        <div id="scanList" style="display:flex;flex-direction:column;gap:5px"></div>
         <div id="refList" style="display:flex;flex-direction:column;gap:6px"></div>
-        <div class="note">Draw over something you know the real size of. If the plan prints dimensions, use one of those. If not, draw across a standard door leaf and pick <b>900&nbsp;mm</b>. Add several references — they are combined by total length for a better scale.</div>
+        <div class="note"><b>Scan</b> reads every printed dimension on the plan (needs internet the first time, ~15&nbsp;s). Tap one → it zooms you to that number with the value filled in → draw the line over it → Apply. Or just draw manually: over a known dimension, or across a door leaf = <b>900&nbsp;mm</b>. Several references combine for a better scale.</div>
       </div>
     </section>
 
@@ -582,6 +585,8 @@
     srcBlob: null,       // PNG blob of the loaded image (for session restore)
     rate: 0,             // currency per area unit (matches state.units)
     lenBuf: "",          // typed exact-length buffer (mm) while drawing
+    pendingRefVal: null, // {v, unit} prefilled into the next calibration popover
+    scanCands: [],       // OCR-found printed dimensions
     _lastNudge: 0,
   };
   let idc = 1;
@@ -1031,6 +1036,7 @@
 
     // references
     for (const r of state.refs) if (r.a && r.b) drawRef(r.a, r.b, fmtLenShort(r.mm), "ref");
+    if (state.mode === "calibrate" && state.scanCands.length) drawScanCands();
     if (state.calib && state.calib.a && state.calib.b) drawRef(state.calib.a, state.calib.b, null, "calib");
     else if (state.calib && state.calib.a) drawCalibPending();
 
@@ -1259,6 +1265,18 @@
   }
 
   function getVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+
+  function drawScanCands() {
+    ctx.save();
+    ctx.fillStyle = getVar("--teal");
+    for (const c of state.scanCands) {
+      const p = S({ x: c.cx, y: c.cy });
+      if (p.x < -20 || p.y < -20 || p.x > W() + 20 || p.y > H() + 20) continue;
+      ctx.globalAlpha = 0.55;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 3.5, 0, 7); ctx.fill();
+    }
+    ctx.restore();
+  }
 
   function drawCalibPending() {
     const col = getVar("--teal");
@@ -1767,6 +1785,12 @@
     pop.classList.add("show");
     $("#popVal").value = "";
     if (ocrLib !== false) { $("#popOcr").style.display = ""; $("#popOcr").disabled = false; $("#popOcrNote").textContent = "or type it below"; }
+    if (state.pendingRefVal) {
+      $("#popVal").value = state.pendingRefVal.v;
+      $("#popUnit").value = state.pendingRefVal.unit || "mm";
+      $("#popOcrNote").textContent = "value pre-filled from the plan — check the unit, then Apply";
+      state.pendingRefVal = null;
+    }
     drawPopCrop();
     updatePopPx();
     setTimeout(() => $("#popVal").focus(), 30);
@@ -1860,6 +1884,98 @@
     btn.disabled = false;
   }
   $("#popOcr").addEventListener("click", readDimension);
+
+  // ---------- scan the whole plan for printed dimensions ----------
+  function grayFull(maxDim) {
+    const sc = Math.min(1, maxDim / Math.max(state.iw, state.ih));
+    const w = Math.round(state.iw * sc), h = Math.round(state.ih * sc);
+    const c = document.createElement("canvas"); c.width = w; c.height = h;
+    const g = c.getContext("2d");
+    g.fillStyle = "#fff"; g.fillRect(0, 0, w, h);
+    g.filter = "grayscale(1) contrast(1.4)";
+    g.drawImage(state.enhanced || state.src, 0, 0, w, h);
+    g.filter = "none";
+    return { canvas: c, w, h, sc };
+  }
+  async function scanDimensions() {
+    if (!state.src) return;
+    const btn = $("#scanDims"), note = $("#scanNote");
+    btn.disabled = true; note.style.display = "block"; note.textContent = "loading OCR…";
+    const T = await loadOcr();
+    if (!T) { btn.style.display = "none"; note.textContent = "Scan needs internet the first time — draw the reference line manually."; return; }
+    note.textContent = "scanning the plan… (this can take 10–40 s)";
+    await new Promise((r) => setTimeout(r, 30));
+    try {
+      const gf = grayFull(2000);
+      const { data } = await T.recognize(gf.canvas, "eng",
+        { logger: (m) => { if (m.status === "recognizing text") note.textContent = "scanning… " + Math.round(m.progress * 100) + "%"; } },
+        { tessedit_char_whitelist: "0123456789.", tessedit_pageseg_mode: "11" });
+      const cands = [];
+      for (const wd of (data.words || [])) {
+        const t = (wd.text || "").trim();
+        const isM = /^\d{1,2}\.\d{1,3}$/.test(t);
+        if (!/^\d{3,6}$/.test(t) && !isM) continue;
+        const val = parseFloat(t);
+        const mmGuess = isM ? val * 1000 : val;
+        if (mmGuess < 200 || mmGuess > 99000) continue;
+        if ((wd.confidence || 0) < 55) continue;
+        const b = wd.bbox;
+        cands.push({
+          text: t, val, unit: isM ? "m" : "mm",
+          cx: (b.x0 + b.x1) / 2 / gf.sc, cy: (b.y0 + b.y1) / 2 / gf.sc,
+          conf: Math.round(wd.confidence || 0),
+        });
+      }
+      // dedupe near-duplicate tokens
+      cands.sort((p, q) => q.conf - p.conf);
+      const kept = [];
+      for (const c of cands) {
+        if (kept.some((k) => k.text === c.text && Math.hypot(k.cx - c.cx, k.cy - c.cy) < 45)) continue;
+        kept.push(c);
+      }
+      kept.sort((p, q) => p.cy - q.cy || p.cx - q.cx);
+      state.scanCands = kept;
+      note.textContent = kept.length
+        ? `Found ${kept.length} printed dimension${kept.length > 1 ? "s" : ""}. Tap one → it jumps you to that spot with the number filled in; draw the line over it and Apply.`
+        : "No dimension text recognised — try Auto enhance first, or draw the reference manually.";
+      renderScanList();
+      render();
+    } catch (e) {
+      console.warn(e); note.textContent = "Scan failed — draw the reference manually.";
+    } finally {
+      btn.disabled = !state.src;
+    }
+  }
+  function renderScanList() {
+    const list = $("#scanList");
+    list.innerHTML = "";
+    state.scanCands.forEach((c, i) => {
+      const d = document.createElement("div");
+      d.className = "ref";
+      d.innerHTML = `<span>${c.text}<small style="color:var(--faint)"> ${c.unit}</small></span>`
+        + `<span style="font-size:10.5px;color:var(--faint)">conf ${c.conf}</span>`
+        + `<button class="btn sm" data-i="${i}">Go</button>`;
+      d.querySelector("button").addEventListener("click", () => useScanCand(i));
+      list.appendChild(d);
+    });
+  }
+  function useScanCand(i) {
+    const c = state.scanCands[i];
+    if (!c) return;
+    setMode("calibrate");
+    state.calib = null;
+    state.pendingRefVal = { v: c.val, unit: c.unit };
+    centreOn(c.cx, c.cy, clamp(Math.max(W(), H()) / 260, 1.5, 5));
+    render(); updateHud();
+    toast(`Now draw the line over "${c.text}" — the value is already filled in`);
+  }
+  function centreOn(x, y, zoom) {
+    if (zoom) state.view.s = clamp(zoom, 0.05, 12);
+    state.view.ox = W() / 2 - x * state.view.s;
+    state.view.oy = H() / 2 - y * state.view.s;
+    updateZoomLabel();
+  }
+  $("#scanDims").addEventListener("click", scanDimensions);
   $("#popApply").addEventListener("click", applyPop);
   $("#popCancel").addEventListener("click", () => { state.calib = null; closePop(); render(); updateHud(); });
   function applyPop() {
@@ -2089,6 +2205,8 @@
     const canDraw = !!state.mmPerPx;
     $("#newSpace").disabled = !canDraw;
     $("#autoRooms").disabled = !canDraw;
+    $("#scanDims").disabled = !state.src;
+    renderScanList();
     ["draw", "rect", "line", "count", "measure"].forEach((mo) => $$(`#modes button[data-mode="${mo}"]`).forEach((b) => (b.disabled = !canDraw)));
     $("#clearImg").disabled = !state.src;
 
@@ -2537,7 +2655,7 @@
       state.enhanced = null;
       state.fileName = name;
       state.refs = []; state.spaces = []; state.lines = []; state.counts = []; state.measures = [];
-      state.draft = []; state.lineDraft = []; state.countDraft = [];
+      state.draft = []; state.lineDraft = []; state.countDraft = []; state.scanCands = []; state.pendingRefVal = null;
       state.selId = null; state.mmPerPx = null; state.rectStart = null; state.measTmp = null;
       undoStack = []; redoStack = []; updateUndoUI();
       state.enh = { bright: 1, contrast: 1, sharp: 0, thresh: 0, gray: false };
@@ -2566,7 +2684,7 @@
     if ((state.spaces.length || state.refs.length) && !confirm("Remove the plan and clear all spaces, references and measurements?")) return;
     state.src = null; state.enhanced = null; state.srcBlob = null;
     state.spaces = []; state.refs = []; state.lines = []; state.counts = []; state.measures = [];
-    state.draft = []; state.lineDraft = []; state.countDraft = [];
+    state.draft = []; state.lineDraft = []; state.countDraft = []; state.scanCands = []; state.pendingRefVal = null;
     state.mmPerPx = null; state.selId = null; state.rectStart = null; state.measTmp = null;
     undoStack = []; redoStack = []; updateUndoUI();
     $("#empty").classList.remove("hide");
