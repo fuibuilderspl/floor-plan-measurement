@@ -481,6 +481,15 @@
       </div>
     </section>
 
+    <section class="sec" data-sec="ruler">
+      <h3>Ruler <span class="zh">量尺 · 临时</span><span class="chev">▾</span></h3>
+      <div class="secbody">
+        <button class="btn wide" id="newMeasure" disabled>+ Measure a distance &nbsp;·&nbsp; <i class="k">M</i></button>
+        <div class="note">Quick spot checks (ceiling height notes, a wall length) — <b>not</b> part of the quote. Click two points; each line is listed here. Right-click a line's end on the plan, or use ✕ below, to remove one.</div>
+        <div id="measureList" style="display:flex;flex-direction:column;gap:6px"></div>
+      </div>
+    </section>
+
     <section class="sec collapsed" data-sec="quote">
       <h3>Quote details <span class="zh">报价资料</span><span class="chev">▾</span></h3>
       <div class="secbody">
@@ -1023,6 +1032,7 @@
     // references
     for (const r of state.refs) if (r.a && r.b) drawRef(r.a, r.b, fmtLenShort(r.mm), "ref");
     if (state.calib && state.calib.a && state.calib.b) drawRef(state.calib.a, state.calib.b, null, "calib");
+    else if (state.calib && state.calib.a) drawCalibPending();
 
     // spaces
     state.spaces.forEach((sp) => drawSpace(sp, sp.id === state.selId));
@@ -1250,6 +1260,30 @@
 
   function getVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 
+  function drawCalibPending() {
+    const col = getVar("--teal");
+    const A = S(state.calib.a);
+    ctx.save();
+    ctx.strokeStyle = col; ctx.fillStyle = col;
+    // point 1 marker: filled dot + ring + label
+    ctx.beginPath(); ctx.arc(A.x, A.y, 5, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(A.x, A.y, 9, 0, 7); ctx.lineWidth = 2; ctx.stroke();
+    tag(A.x, A.y - 16, "point 1", col, "#fff", 10);
+    // rubber band to the (snapped) cursor
+    if (state.cursor) {
+      const c = snap(state.cursor) || snapEdge(state.cursor) || state.cursor;
+      const C = S(c);
+      ctx.setLineDash([6, 4]); ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(C.x, C.y); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(C.x, C.y, 4, 0, 7); ctx.fill();
+      const px = dist(state.calib.a, c);
+      const txt = mmPerPx() ? fmtLenShort(px * mmPerPx()) : Math.round(px) + " px";
+      tag((A.x + C.x) / 2, (A.y + C.y) / 2 - 12, txt, col, "#fff");
+    }
+    ctx.restore();
+  }
+
   function drawRef(a, b, label, kind) {
     const A = S(a), B = S(b);
     const col = getVar("--teal");
@@ -1260,7 +1294,11 @@
     if (kind === "calib") ctx.setLineDash([6, 4]);
     ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke();
     ctx.setLineDash([]);
-    for (const P of [A, B]) { ctx.beginPath(); ctx.arc(P.x, P.y, 4, 0, 7); ctx.fill(); }
+    for (const P of [A, B]) {
+      ctx.beginPath(); ctx.arc(P.x, P.y, kind === "calib" ? 5 : 4, 0, 7); ctx.fill();
+      if (kind === "calib") { ctx.beginPath(); ctx.arc(P.x, P.y, 9, 0, 7); ctx.lineWidth = 2; ctx.stroke(); }
+    }
+    if (kind === "calib") { tag(A.x, A.y - 16, "point 1", col, "#fff", 10); tag(B.x, B.y - 16, "point 2", col, "#fff", 10); }
     const mid = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
     const txt = label != null ? label : (mmPerPx() ? fmtLenShort(dist(a, b) * mmPerPx()) : Math.round(dist(a, b)) + " px");
     tag(mid.x, mid.y - 12, txt, col, "#fff");
@@ -1609,6 +1647,7 @@
     }
     if (state.mode === "rect" && state.rectStart) { state.rectStart = null; render(); toast("Rectangle cancelled"); return; }
     if (state.mode === "measure" && state.measTmp) { state.measTmp = null; render(); return; }
+    if (state.mode === "calibrate" && state.calib && state.calib.a && !state.calib.b) { state.calib = null; render(); updateHud(); toast("Point 1 removed — click again"); return; }
 
     const hit = hitTest(pos);
     if (hit && hit.type === "measure") {
@@ -1967,8 +2006,12 @@
     const k = mmPerPx();
     let html = "";
     if (state.mode === "calibrate") {
-      if (state.calib && state.calib.a && !state.calib.b) html = `<span><span class="lbl">Scale</span>click the other end of the known length</span>`;
-      else html = `<span><span class="lbl">Scale</span>click two ends of a known dimension (or a door = 900 mm)</span>`;
+      if (state.calib && state.calib.a && !state.calib.b) {
+        const cur = state.cursor ? (snap(state.cursor) || snapEdge(state.cursor) || state.cursor) : null;
+        const px = cur ? dist(state.calib.a, cur) : 0;
+        html = `<span><span class="lbl">Point 1 set</span>click point 2 &nbsp;·&nbsp; right-click = undo</span>`
+          + (px ? `<span><span class="lbl">Length</span><b>${k ? fmtLen(px * k) : Math.round(px) + " px"}</b></span>` : "");
+      } else html = `<span><span class="lbl">Scale</span>click the two ends of a known dimension (or across a door = 900 mm)</span>`;
     } else if (state.mode === "draw" && state.draft.length) {
       let cur = state.cursor ? (aimPoint(state.draft[state.draft.length - 1]) || state.cursor) : null;
       const segMm = cur && k ? dist(state.draft[state.draft.length - 1], cur) * k : null;
@@ -2100,7 +2143,30 @@
 
     renderLines();
     renderCounts();
+    renderMeasures();
     paintTotals();
+  }
+  function renderMeasures() {
+    $("#newMeasure").disabled = !state.mmPerPx;
+    const list = $("#measureList");
+    list.innerHTML = "";
+    state.measures.forEach((mm, i) => {
+      const px = dist(mm.a, mm.b);
+      const len = state.mmPerPx
+        ? (state.units === "ft" ? (px * state.mmPerPx / 304.8).toFixed(2) + " ft" : (px * state.mmPerPx / 1000).toFixed(3) + " m") + `  (${nf.format(Math.round(px * state.mmPerPx))} mm)`
+        : Math.round(px) + " px";
+      const d = document.createElement("div");
+      d.className = "ref";
+      d.innerHTML = `<span>M${i + 1}</span><span>${len}</span><button class="x" title="Remove this ruler line">✕</button>`;
+      d.querySelector(".x").addEventListener("click", () => { pushHistory(); state.measures.splice(i, 1); persist(); renderPanel(); render(); });
+      list.appendChild(d);
+    });
+    if (state.measures.length > 1) {
+      const c = document.createElement("button");
+      c.className = "btn ghost sm"; c.textContent = "Clear all ruler lines";
+      c.addEventListener("click", () => { pushHistory(); state.measures = []; persist(); renderPanel(); render(); });
+      list.appendChild(c);
+    }
   }
 
   function rateOf(sp) { return (sp.rate != null && sp.rate !== "") ? (sp.rate || 0) : (state.rate || 0); }
@@ -2303,6 +2369,7 @@
   $("#autoRooms").addEventListener("click", detectRooms);
   $("#newLine").addEventListener("click", () => setMode("line"));
   $("#newCount").addEventListener("click", () => setMode("count"));
+  $("#newMeasure").addEventListener("click", () => setMode("measure"));
   $("#addRef").addEventListener("click", () => setMode("calibrate"));
 
   $("#unitseg").addEventListener("click", (e) => {
