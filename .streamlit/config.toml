@@ -1,0 +1,13 @@
+[theme]
+base = "light"
+primaryColor = "#e0481c"
+backgroundColor = "#eef0ec"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1b2429"
+
+[server]
+# The tool keeps its own state in the browser; no file uploads hit the server.
+maxUploadSize = 5
+
+[browser]
+gatherUsageStats = false
