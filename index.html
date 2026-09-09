@@ -345,6 +345,7 @@
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
+
 </head>
 <body>
 <header>
@@ -421,6 +422,7 @@
       <div class="note" id="popPx">–</div>
       <div class="row">
         <button class="btn teal wide" id="popApply">Apply</button>
+        <button class="btn ghost sm" id="popRedraw" title="clear the line and draw it again">↻ Redraw</button>
         <button class="btn ghost sm" id="popCancel">Cancel</button>
       </div>
     </div>
@@ -464,7 +466,7 @@
         <div class="note" id="scanNote" style="display:none"></div>
         <div id="scanList" style="display:flex;flex-direction:column;gap:5px"></div>
         <div id="refList" style="display:flex;flex-direction:column;gap:6px"></div>
-        <div class="note"><b>Scan</b> reads every printed dimension on the plan (needs internet the first time, ~15&nbsp;s). Tap one → it zooms you to that number with the value filled in → draw the line over it → Apply. Or just draw manually: over a known dimension, or across a door leaf = <b>900&nbsp;mm</b>. Several references combine for a better scale.</div>
+        <div class="note"><b>Scan</b> reads every printed dimension on the plan (needs internet the first time, ~15&nbsp;s). Tap one → it zooms you to that number with the value filled in → draw the line over it → Apply. Or just draw manually: over a known dimension, or across a door leaf = <b>900&nbsp;mm</b>. Several references combine for a better scale.<br />Drew it wrong? Right-click (or the ⌫ / ↻ Redraw buttons) removes the last point or the whole line so you can draw it again. An applied reference can be removed with the ✕ next to it, or its ends dragged in Edit mode.</div>
       </div>
     </section>
 
@@ -1688,6 +1690,7 @@
     }
     if (state.mode === "rect" && state.rectStart) { state.rectStart = null; render(); toast("Rectangle cancelled"); return; }
     if (state.mode === "measure" && state.measTmp) { state.measTmp = null; render(); return; }
+    if (state.mode === "calibrate" && state.calib && state.calib.a && state.calib.b) { state.calib.b = null; closePop(); render(); updateHud(); toast("Point 2 removed — click it again"); return; }
     if (state.mode === "calibrate" && state.calib && state.calib.a && !state.calib.b) { state.calib = null; render(); updateHud(); toast("Point 1 removed — click again"); return; }
 
     const hit = hitTest(pos);
@@ -2001,6 +2004,7 @@
   $("#scanDims").addEventListener("click", scanDimensions);
   $("#popApply").addEventListener("click", applyPop);
   $("#popCancel").addEventListener("click", () => { state.calib = null; closePop(); render(); updateHud(); });
+  $("#popRedraw").addEventListener("click", () => { state.calib = null; closePop(); render(); updateHud(); toast("Draw the reference line again — click the two ends"); });
   function applyPop() {
     if (!state.calib || !state.calib.a || !state.calib.b) { toast("Draw the reference line first"); return; }
     const v = parseFloat($("#popVal").value);
@@ -2214,6 +2218,7 @@
     if (state.mode === "count" && state.countDraft.length) return { n: state.countDraft.length, label: `count · ${state.countDraft.length} marked` };
     if (state.mode === "rect" && state.rectStart) return { n: 1, label: "rectangle · first corner set" };
     if (state.mode === "measure" && state.measTmp) return { n: 1, label: "ruler · first point set" };
+    if (state.mode === "calibrate" && state.calib && state.calib.a && state.calib.b) return { n: 2, label: "reference · line drawn — type the length, or redo it" };
     if (state.mode === "calibrate" && state.calib && state.calib.a && !state.calib.b) return { n: 1, label: "reference · point 1 set" };
     return null;
   }
@@ -2228,7 +2233,8 @@
     else if (state.mode === "count" && state.countDraft.length) state.countDraft.pop();
     else if (state.mode === "rect" && state.rectStart) state.rectStart = null;
     else if (state.mode === "measure" && state.measTmp) state.measTmp = null;
-    else if (state.mode === "calibrate" && state.calib) { state.calib = null; closePop(); }
+    else if (state.mode === "calibrate" && state.calib && state.calib.b) { state.calib.b = null; closePop(); toast("Point 2 removed — click it again"); }
+    else if (state.mode === "calibrate" && state.calib) { state.calib = null; closePop(); toast("Reference line cleared"); }
     else return;
     state.snapPt = null; state.guides = []; state.lenBuf = "";
     render(); updateHud();
@@ -2633,6 +2639,7 @@
     else if (e.key === "Escape") { cancelDraft(); state.calib = null; closePop(); render(); }
     else if (e.key === "Backspace" && (state.mode === "draw" || state.mode === "line") && curDraft().length) { curDraft().pop(); render(); updateHud(); }
     else if (e.key === "Backspace" && state.mode === "count" && state.countDraft.length) { state.countDraft.pop(); render(); updateHud(); }
+    else if (e.key === "Backspace" && state.mode === "calibrate" && state.calib) { undoDraftPoint(); }
     else if ((e.key === "Delete" || e.key === "Backspace") && state.mode === "edit" && state.selId != null) {
       pushHistory();
       state.spaces = state.spaces.filter((s) => s.id !== state.selId); state.selId = null; persist(); renderPanel(); render();
@@ -3307,10 +3314,9 @@
   restoreSession();
 
   if (location.hostname === "localhost" || location.protocol === "file:") {
-    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap };
+    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop };
   }
 })();
 </script>
-
 </body>
 </html>
