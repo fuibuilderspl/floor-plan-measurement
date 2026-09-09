@@ -1275,8 +1275,9 @@
       ctx.restore();
     }
 
-    // magnifier loupe while placing points
-    if (state.loupe && state.cursor && /^(calibrate|draw|rect|measure|line|count)$/.test(state.mode)) drawLoupe();
+    // magnifier loupe while placing points (desktop only — app view uses pinch-zoom instead)
+    if (state.loupe && state.cursor && !document.body.classList.contains("appui")
+      && /^(calibrate|draw|rect|measure|line|count)$/.test(state.mode)) drawLoupe();
 
     drawScaleBar();
   }
