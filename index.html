@@ -246,8 +246,24 @@
   .space.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .space .top { display: flex; align-items: center; gap: 8px; padding: 9px 10px; }
   .space .swatch { width: 12px; height: 12px; border-radius: 3px; flex: 0 0 auto; }
-  .space .name { border: 0; background: transparent; font-weight: 600; font-size: 13px; padding: 2px 4px; border-radius: 4px; flex: 1; min-width: 0; }
+  .space .name { border: 0; border-bottom: 1px dashed var(--line-strong); background: transparent; font-weight: 600; font-size: 13px; padding: 2px 4px; border-radius: 3px 3px 0 0; flex: 1; min-width: 0; cursor: text; }
   .space .name:hover { background: var(--surface-3); }
+  .space .name:focus { outline: none; border-bottom-color: var(--accent); border-bottom-style: solid; background: var(--surface-3); }
+
+  .drawbar {
+    position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 7;
+    display: flex; gap: 6px; align-items: center; pointer-events: none;
+    background: color-mix(in srgb, var(--surface) 92%, transparent);
+    backdrop-filter: blur(6px); border: 1px solid var(--line-strong); border-radius: 9px;
+    padding: 5px 6px 5px 10px; box-shadow: var(--shadow); font-size: 12px; color: var(--muted);
+  }
+  .drawbar b { color: var(--ink); font-family: var(--font-mono); }
+  .drawbar button { pointer-events: auto;
+    border: 1px solid var(--line); background: var(--surface-2); border-radius: 6px;
+    padding: 4px 9px; font-size: 12px; font-weight: 500; display: inline-flex; align-items: center; gap: 5px;
+  }
+  .drawbar button:hover { border-color: var(--line-strong); background: var(--surface-3); }
+  .drawbar button.danger:hover { border-color: var(--accent); color: var(--accent); }
   .space .del, .space .dup, .space .op { border: 0; background: transparent; color: var(--faint); font-size: 13px; padding: 2px 4px; border-radius: 4px; flex: 0 0 auto; }
   .space .del:hover, .space .dup:hover { color: var(--accent); background: var(--surface-3); }
   .space .op { font-family: var(--font-mono); font-weight: 700; border: 1px solid var(--line); width: 20px; }
@@ -377,6 +393,12 @@
       <span><span class="lbl">Scale</span><span id="hudScale">not set</span></span>
     </div>
 
+    <div class="drawbar" id="drawbar" hidden>
+      <span id="drawbarLbl">drawing</span>
+      <button id="dbUndo" title="Backspace / right-click">⌫ Undo point</button>
+      <button id="dbClear" class="danger" title="Esc">✕ Start over</button>
+    </div>
+
     <div class="pop" id="pop">
       <h4>Reference length / 参照长度</h4>
       <canvas id="popCrop" width="230" height="70" style="width:100%;border:1px solid var(--line);border-radius:6px;background:var(--surface-2);image-rendering:pixelated"></canvas>
@@ -456,9 +478,10 @@
           <input type="number" id="rate" step="any" min="0" placeholder="0.00" />
           <span class="note" id="rateUnit">$/ft²</span>
         </label>
-        <div class="note" id="spaceHint">Trace a room with <b>Draw</b> (click each corner; <b>Enter</b> or click the first point to close) or <b>Rect</b> (two opposite corners). Points snap to corners, walls, and align with other corners; a <b>magnifier</b> shows the exact spot (<b>L</b> to hide). Type a number + <b>Enter</b> = exact mm along the aim line. <b>Shift</b> = straight walls. <b>Ctrl+Z</b> = undo.<br>
+        <div class="note" id="spaceHint">Trace a room with <b>Draw</b> (click each corner; <b>Enter</b> or click the first point to close) or <b>Rect</b> (two opposite corners). Points snap to corners, walls, and align with other corners; a <b>magnifier</b> shows the exact spot (<b>L</b> to hide). Type a number + <b>Enter</b> = exact mm along the aim line. <b>Shift</b> = straight walls.<br>
+        Made a mistake mid-draw? Use the bar at the top of the plan — <b>⌫ Undo point</b> (or Backspace / right-click) and <b>✕ Start over</b> (or Esc). <b>Ctrl+Z</b> undoes a finished room.<br>
         <b>Edit</b> mode: drag a corner, drag inside to move the room, <b>arrow keys</b> nudge, <b>right-click</b> a corner to delete, <b>double-click</b> a wall to add one.<br>
-        Card: <b>+ / −</b> add / deduct (voids) · <b>⧉</b> duplicate · leave rate blank to use the default.</div>
+        On the card: click the <b>name</b> to rename · <b>+ / −</b> add / deduct (voids) · <b>⧉</b> duplicate · blank rate = use the default.</div>
         <div id="spaceList" style="display:flex;flex-direction:column;gap:10px"></div>
         <div class="subtotal" id="areaSub"></div>
       </div>
@@ -986,7 +1009,7 @@
         const m = polyMetrics(pts);
         if (m.areaM2 == null || m.areaM2 < 1 || m.areaM2 > 500) continue;
         const sp = {
-          id: idc++, name: "Room " + (state.spaces.length + 1),
+          id: idc++, name: uniqName(state.spaces, "Room"),
           pts, color: SPACE_COLORS[state.spaces.length % SPACE_COLORS.length],
         };
         state.spaces.push(sp); added++;
@@ -1998,10 +2021,17 @@
   }
 
   // ---------- drawing ----------
-  function addSpaceFromPts(pts, announce) {
+  // a default name that is guaranteed not to clash with an existing one in `list`
+  function uniqName(list, prefix) {
+    const taken = new Set(list.map((x) => (x.name || "").trim()));
+    let n = 1;
+    while (taken.has(prefix + " " + n)) n++;
+    return prefix + " " + n;
+  }
+  function addSpaceFromPts(pts, prefix) {
     const sp = {
       id: idc++,
-      name: "Space " + (state.spaces.length + 1),
+      name: uniqName(state.spaces, prefix || "Space"),
       pts: pts.map((p) => ({ x: p.x, y: p.y })),
       color: SPACE_COLORS[state.spaces.length % SPACE_COLORS.length],
     };
@@ -2009,7 +2039,7 @@
     state.selId = sp.id;
     persist();
     renderPanel(); render(); updateHud();
-    toast((announce || sp.name) + " added");
+    toast(sp.name + " added");
     return sp;
   }
   function handleDrawClick(w, screenPt) {
@@ -2061,7 +2091,7 @@
     pushHistory();
     const it = {
       id: idc++,
-      name: "Line " + (state.lines.length + 1),
+      name: uniqName(state.lines, "Line"),
       pts: state.lineDraft.map((p) => ({ x: p.x, y: p.y })),
       rate: 0,
       color: SPACE_COLORS[(state.lines.length + 3) % SPACE_COLORS.length],
@@ -2084,7 +2114,7 @@
     pushHistory();
     const it = {
       id: idc++,
-      name: "Item " + (state.counts.length + 1),
+      name: uniqName(state.counts, "Item"),
       pts: state.countDraft.map((p) => ({ x: p.x, y: p.y })),
       qty: state.countDraft.length,
       rate: 0,
@@ -2176,13 +2206,54 @@
       if (state.mode === "draw") html += `<span><span class="lbl"></span>click the first corner of a room</span>`;
     }
     hud.innerHTML = html;
+    updateDrawbar();
   }
+  function activeDraftInfo() {
+    if (state.mode === "draw" && state.draft.length) return { n: state.draft.length, label: `room · ${state.draft.length} corner${state.draft.length > 1 ? "s" : ""} placed` };
+    if (state.mode === "line" && state.lineDraft.length) return { n: state.lineDraft.length, label: `line · ${state.lineDraft.length} point${state.lineDraft.length > 1 ? "s" : ""}` };
+    if (state.mode === "count" && state.countDraft.length) return { n: state.countDraft.length, label: `count · ${state.countDraft.length} marked` };
+    if (state.mode === "rect" && state.rectStart) return { n: 1, label: "rectangle · first corner set" };
+    if (state.mode === "measure" && state.measTmp) return { n: 1, label: "ruler · first point set" };
+    if (state.mode === "calibrate" && state.calib && state.calib.a && !state.calib.b) return { n: 1, label: "reference · point 1 set" };
+    return null;
+  }
+  function updateDrawbar() {
+    const info = activeDraftInfo();
+    $("#drawbar").hidden = !info;
+    if (info) $("#drawbarLbl").textContent = info.label;
+  }
+  function undoDraftPoint() {
+    if (state.mode === "draw" && state.draft.length) state.draft.pop();
+    else if (state.mode === "line" && state.lineDraft.length) state.lineDraft.pop();
+    else if (state.mode === "count" && state.countDraft.length) state.countDraft.pop();
+    else if (state.mode === "rect" && state.rectStart) state.rectStart = null;
+    else if (state.mode === "measure" && state.measTmp) state.measTmp = null;
+    else if (state.mode === "calibrate" && state.calib) { state.calib = null; closePop(); }
+    else return;
+    state.snapPt = null; state.guides = []; state.lenBuf = "";
+    render(); updateHud();
+  }
+  function clearActiveDraft() {
+    state.draft = []; state.lineDraft = []; state.countDraft = [];
+    state.rectStart = null; state.measTmp = null; state.calib = null;
+    state.snapPt = null; state.guides = []; state.lenBuf = "";
+    closePop();
+    render(); updateHud();
+    toast("Cleared — draw it again");
+  }
+  $("#dbUndo").addEventListener("click", undoDraftPoint);
+  $("#dbClear").addEventListener("click", clearActiveDraft);
   function areaStr(m) {
     if (m.areaFt2 == null) return "–";
     return m.areaFt2.toFixed(1) + " ft² · " + m.areaM2.toFixed(2) + " m²";
   }
 
   // ---------- panel ----------
+  // update the selected-card highlight without rebuilding the list (keeps input focus)
+  function markSel(list, card) {
+    list.querySelectorAll(".space.sel").forEach((el) => el.classList.remove("sel"));
+    if (card) card.classList.add("sel");
+  }
   function renderPanel() {
     // scale pill + refs
     const pill = $("#scalePill");
@@ -2240,7 +2311,7 @@
         <details class="disc"><summary>Show calculation / 计算公式</summary><pre class="formula">${formulaText(sp, m)}</pre></details>
       `;
       card.querySelector(".name").addEventListener("input", (e) => { sp.name = e.target.value; persist(); render(); });
-      card.querySelector(".name").addEventListener("focus", () => { state.selId = sp.id; renderPanel(); render(); });
+      card.querySelector(".name").addEventListener("focus", () => { state.selId = sp.id; markSel(list, card); render(); });
       card.querySelector(".sr").addEventListener("input", (e) => {
         sp.rate = e.target.value === "" ? null : (parseFloat(e.target.value) || 0); persist();
         card.querySelector(".scost").textContent = spaceCost(sp) ? (sp.op === "deduct" ? "− $" : "= $") + nf.format(Math.round(Math.abs(spaceCost(sp)))) : "";
@@ -2249,7 +2320,9 @@
       card.querySelector(".op").addEventListener("click", () => { pushHistory(); sp.op = deduct ? "add" : "deduct"; persist(); renderPanel(); render(); });
       card.querySelector(".dup").addEventListener("click", () => {
         pushHistory();
-        const copy = { id: idc++, name: sp.name + " copy", op: sp.op, color: SPACE_COLORS[state.spaces.length % SPACE_COLORS.length], pts: sp.pts.map((p) => ({ x: p.x + 24, y: p.y + 24 })) };
+        let nm = sp.name + " copy"; let kk = 2;
+        while (state.spaces.some((s) => s.name === nm)) nm = sp.name + " copy " + (kk++);
+        const copy = { id: idc++, name: nm, op: sp.op, rate: sp.rate, color: SPACE_COLORS[state.spaces.length % SPACE_COLORS.length], pts: sp.pts.map((p) => ({ x: p.x + 24, y: p.y + 24 })) };
         state.spaces.splice(si + 1, 0, copy); state.selId = copy.id;
         persist(); renderPanel(); render();
         toast("Duplicated — drag it into place in Edit mode");
@@ -2365,7 +2438,7 @@
           <span class="line"><span class="lrate">rate <input type="number" class="cr" step="any" min="0" value="${it.rate || ""}" placeholder="0.00"> $ each</span><span class="ccost">${it.rate > 0 ? "= $" + nf.format(Math.round(cost)) : ""}</span></span>
         </div>`;
       card.querySelector(".name").addEventListener("input", (e) => { it.name = e.target.value; persist(); render(); });
-      card.querySelector(".name").addEventListener("focus", () => { state.selId = it.id; renderPanel(); render(); });
+      card.querySelector(".name").addEventListener("focus", () => { state.selId = it.id; markSel(list, card); render(); });
       card.querySelector(".qty").addEventListener("input", (e) => {
         it.qty = Math.max(0, parseInt(e.target.value) || 0); persist();
         card.querySelector(".ccost").textContent = it.rate > 0 ? "= $" + nf.format(Math.round((it.rate || 0) * it.qty)) : "";
@@ -2405,7 +2478,7 @@
           <span class="line"><span class="lrate">rate <input type="number" class="lr" step="any" min="0" value="${it.rate || ""}" placeholder="0.00"> $/${state.units === "ft" ? "ft" : "m"}</span><span class="lcost">${it.rate > 0 ? "= $" + nf.format(Math.round(costOf())) : ""}</span></span>
         </div>`;
       card.querySelector(".name").addEventListener("input", (e) => { it.name = e.target.value; persist(); render(); });
-      card.querySelector(".name").addEventListener("focus", () => { state.selId = it.id; renderPanel(); render(); });
+      card.querySelector(".name").addEventListener("focus", () => { state.selId = it.id; markSel(list, card); render(); });
       card.querySelector(".lr").addEventListener("input", (e) => {
         it.rate = parseFloat(e.target.value) || 0; persist();
         card.querySelector(".lcost").textContent = it.rate > 0 ? "= $" + nf.format(Math.round(costOf())) : "";
