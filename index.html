@@ -103,6 +103,8 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    height: 100vh;
+    height: 100svh; /* iOS: the always-visible area, so the bottom bar sits above Safari's toolbar */
   }
   button { font-family: inherit; color: inherit; cursor: pointer; }
   input, select { font-family: inherit; color: inherit; }
@@ -358,9 +360,9 @@
   .appTotal span { color: var(--accent); font-size: 13px; font-weight: 600; }
   body.appui #undoredo button { width: 38px; height: 34px; font-size: 18px; }
 
-  /* bottom action bar — always the frontmost bottom layer */
+  /* bottom action bar — a normal flex row pinned at the foot of the app shell */
   .appbar {
-    position: fixed; left: 0; right: 0; bottom: 0; z-index: 46;
+    flex: 0 0 auto; position: relative; z-index: 47;
     background: var(--surface); border-top: 1px solid var(--line-strong);
     box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.16);
     padding: 5px 5px calc(5px + env(safe-area-inset-bottom, 0px));
@@ -380,27 +382,26 @@
   /* panel becomes a bottom sheet that sits directly above the action bar */
   body.appui main { position: static; }
   body.appui .panel {
-    --appbar-h: calc(64px + env(safe-area-inset-bottom, 0px));
-    position: fixed; left: 0; right: 0; bottom: var(--appbar-h); top: auto; width: auto; flex: none;
-    height: min(72vh, calc(100vh - var(--appbar-h) - 104px)); max-height: none;
+    position: fixed; left: 0; right: 0; bottom: var(--appbar-h, 66px); top: auto; width: auto; flex: none;
+    height: min(72svh, calc(100svh - var(--appbar-h, 66px) - 104px)); max-height: none;
     border: 1px solid var(--line-strong); border-bottom: 0;
     border-radius: 20px 20px 0 0; box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.28);
-    z-index: 44; transform: translateY(calc(100% - 62px));
-    transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 44;
+    transform: translateY(var(--sheet-hide, 60vh)); /* JS sets --sheet-hide in px; collapsed by default */
     overscroll-behavior: contain; padding-bottom: 14px;
   }
   body.appui .panel.sheetopen { transform: translateY(0); }
   body.appui .sheethandle {
-    display: flex; flex-direction: column; align-items: center; gap: 7px;
-    position: sticky; top: 0; z-index: 4; width: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px;
+    position: sticky; top: 0; z-index: 4; width: 100%; height: 76px; flex: 0 0 76px;
     border: 0; border-bottom: 1px solid var(--line); background: var(--surface);
-    padding: 9px 14px 12px; cursor: pointer;
+    padding: 12px 14px; cursor: pointer;
   }
   .sheethandle .grip { width: 42px; height: 4px; border-radius: 2px; background: var(--line-strong); }
   .sheethandle .sum { font-family: var(--font-mono); font-size: 13px; color: var(--ink); font-weight: 600; text-align: center; }
-  body.appui .hud { bottom: calc(132px + env(safe-area-inset-bottom, 0px)); left: 10px; font-size: 12.5px; }
+  body.appui .hud { bottom: 74px; left: 10px; font-size: 12.5px; }
   body.appui .empty:not(.hide) ~ .hud { display: none; }
-  body.appui .toast { bottom: calc(140px + env(safe-area-inset-bottom, 0px)); }
+  body.appui .toast { bottom: 86px; }
   body.appui .drawbar { top: 8px; }
   body.appui .pop { z-index: 48; }
 
@@ -3478,14 +3479,28 @@
     $("#sheetSum").textContent = sum;
   }
 
+  const PEEK = 76; // px of the sheet handle visible when collapsed
+  function measureShell() {
+    const ab = $("#appbar"), panel = $(".panel"), b = document.body.style;
+    if (!isAppUI()) { b.removeProperty("--appbar-h"); b.removeProperty("--sheet-hide"); return; }
+    const abH = ab ? Math.round(ab.getBoundingClientRect().height) : 0;
+    b.setProperty("--appbar-h", (abH || 66) + "px");
+    // hide distance = panel height minus the peek; use the rendered height
+    const ph = panel ? Math.round(panel.getBoundingClientRect().height) : 0;
+    b.setProperty("--sheet-hide", Math.max(0, (ph || Math.round(innerHeight * 0.6)) - PEEK) + "px");
+  }
   function setView(app) {
     document.body.classList.toggle("appui", app);
     $("#viewToggle").innerHTML = app ? "🖥&nbsp;Full view" : "📱&nbsp;App view";
     if (!app) $(".panel").classList.remove("sheetopen");
     try { localStorage.setItem(VIEW_KEY, app ? "1" : "0"); } catch (e) {}
-    syncAppBar(); updateAppShell();
-    requestAnimationFrame(() => { resize(); render(); });
+    syncAppBar(); updateAppShell(); measureShell();
+    requestAnimationFrame(() => { measureShell(); resize(); render(); });
+    setTimeout(measureShell, 300);
   }
+  window.addEventListener("resize", measureShell);
+  window.addEventListener("load", measureShell);
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", measureShell);
   $("#viewToggle").addEventListener("click", () => setView(!isAppUI()));
 
   $("#appbar").addEventListener("click", (e) => {
@@ -3496,7 +3511,10 @@
   });
 
   $("#sheetHandle").addEventListener("click", () => {
-    $(".panel").classList.toggle("sheetopen");
+    const panel = $(".panel");
+    const opening = !panel.classList.contains("sheetopen");
+    panel.classList.toggle("sheetopen", opening);
+    if (opening) panel.scrollTop = 0;
   });
 
   $("#moreSheet").addEventListener("click", (e) => {
