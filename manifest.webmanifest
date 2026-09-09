@@ -1,0 +1,19 @@
+{
+  "name": "Fui Builders — Area Takeoff",
+  "short_name": "Takeoff",
+  "description": "Turn a client floorplan into a demolition quote — set the scale, trace rooms, price the job.",
+  "lang": "en-SG",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#14181c",
+  "theme_color": "#14181c",
+  "categories": ["business", "productivity", "utilities"],
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -8,6 +8,14 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" />
 
+<link rel="manifest" href="manifest.webmanifest" />
+<meta name="theme-color" content="#14181c" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Takeoff" />
+
 <style>
   /* ============ TOKENS — light is the base palette ============ */
   :root {
@@ -336,12 +344,105 @@
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+  /* ============ APP VIEW (touch-first) ============ */
+  .appbar, .moresheet, .sheethandle, .appTotal { display: none; }
+  #installApp[hidden] { display: none; }
+  .drawbar[hidden], .moresheet[hidden] { display: none !important; }
+
+  body.appui header { min-height: 0; padding: 7px 10px; gap: 8px; }
+  body.appui #modes, body.appui #unitseg, body.appui .zoomwrap, body.appui #fit { display: none; }
+  body.appui .brand span { display: none; }
+  body.appui .brand b { font-size: 13px; }
+  body.appui .appTotal { display: inline-flex; align-items: baseline; gap: 8px; font-family: var(--font-mono); }
+  .appTotal b { color: var(--teal); font-size: 15px; font-weight: 600; }
+  .appTotal span { color: var(--accent); font-size: 13px; font-weight: 600; }
+  body.appui #undoredo button { width: 38px; height: 34px; font-size: 18px; }
+
+  /* bottom action bar — always the frontmost bottom layer */
+  .appbar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 46;
+    background: var(--surface); border-top: 1px solid var(--line-strong);
+    box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.16);
+    padding: 5px 5px calc(5px + env(safe-area-inset-bottom, 0px));
+    gap: 3px; justify-content: space-around;
+  }
+  body.appui .appbar { display: flex; }
+  .appbar .ab {
+    flex: 1; border: 0; background: transparent; border-radius: 13px;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+    padding: 8px 3px; font-size: 10.5px; font-weight: 600; color: var(--muted);
+    min-height: 54px; letter-spacing: 0.01em;
+  }
+  .appbar .ab i { font-size: 21px; font-style: normal; line-height: 1; }
+  .appbar .ab.on { color: var(--accent); background: var(--accent-weak); }
+  .appbar .ab:disabled { opacity: 0.32; }
+
+  /* panel becomes a bottom sheet that sits directly above the action bar */
+  body.appui main { position: static; }
+  body.appui .panel {
+    --appbar-h: calc(64px + env(safe-area-inset-bottom, 0px));
+    position: fixed; left: 0; right: 0; bottom: var(--appbar-h); top: auto; width: auto; flex: none;
+    height: min(72vh, calc(100vh - var(--appbar-h) - 104px)); max-height: none;
+    border: 1px solid var(--line-strong); border-bottom: 0;
+    border-radius: 20px 20px 0 0; box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.28);
+    z-index: 44; transform: translateY(calc(100% - 62px));
+    transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+    overscroll-behavior: contain; padding-bottom: 14px;
+  }
+  body.appui .panel.sheetopen { transform: translateY(0); }
+  body.appui .sheethandle {
+    display: flex; flex-direction: column; align-items: center; gap: 7px;
+    position: sticky; top: 0; z-index: 4; width: 100%;
+    border: 0; border-bottom: 1px solid var(--line); background: var(--surface);
+    padding: 9px 14px 12px; cursor: pointer;
+  }
+  .sheethandle .grip { width: 42px; height: 4px; border-radius: 2px; background: var(--line-strong); }
+  .sheethandle .sum { font-family: var(--font-mono); font-size: 13px; color: var(--ink); font-weight: 600; text-align: center; }
+  body.appui .hud { bottom: calc(132px + env(safe-area-inset-bottom, 0px)); left: 10px; font-size: 12.5px; }
+  body.appui .empty:not(.hide) ~ .hud { display: none; }
+  body.appui .toast { bottom: calc(140px + env(safe-area-inset-bottom, 0px)); }
+  body.appui .drawbar { top: 8px; }
+  body.appui .pop { z-index: 48; }
+
+  /* bigger touch targets in app view */
+  body.appui .panel .btn { min-height: 44px; font-size: 13.5px; }
+  body.appui .panel .sec > h3 { padding: 15px 4px; font-size: 15px; }
+  body.appui .panel input:not([type="range"]):not([type="checkbox"]),
+  body.appui .panel select { min-height: 42px; font-size: 16px; }
+  body.appui .space .name { font-size: 15px; }
+  body.appui .dropcard { padding: 32px 28px; }
+  body.appui .bigbtn { padding: 14px 22px; font-size: 15px; }
+
+  /* "more tools" sheet */
+  .moresheet {
+    position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, 0.42);
+    align-items: flex-end;
+  }
+  body.appui .moresheet:not([hidden]) { display: flex; }
+  .moresheet .card {
+    width: 100%; background: var(--surface); border-radius: 20px 20px 0 0;
+    padding: 11px 16px calc(20px + env(safe-area-inset-bottom, 0px));
+    display: flex; flex-direction: column; gap: 13px;
+  }
+  .moresheet .grip { width: 42px; height: 4px; border-radius: 2px; background: var(--line-strong); align-self: center; }
+  .moresheet h4 { margin: 0; font-family: var(--font-head); font-size: 14px; }
+  .moresheet .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .moresheet .grid button {
+    border: 1px solid var(--line); background: var(--surface-2); border-radius: 13px;
+    padding: 16px 13px; font-size: 13.5px; font-weight: 600; text-align: left; color: var(--ink);
+    min-height: 56px;
+  }
+  .moresheet .grid button:active { background: var(--surface-3); }
+
   @media (max-width: 1180px) { .seg .k { display: none; } }
   @media (max-width: 900px) {
     main { flex-direction: column; }
     .panel { flex: 1 1 auto; width: 100%; border-left: 0; border-top: 1px solid var(--line); }
     .stage { flex: 0 0 46vh; }
     .brand span { display: none; }
+    /* app view keeps the plan full-bleed even on narrow screens */
+    body.appui main { flex-direction: row; }
+    body.appui .stage { flex: 1 1 auto; height: auto; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
@@ -364,6 +465,7 @@
     <button id="undoBtn" title="Undo (Ctrl+Z)" disabled>↶</button>
     <button id="redoBtn" title="Redo (Ctrl+Shift+Z)" disabled>↷</button>
   </div>
+  <div class="appTotal" id="appTotal"><b id="appTotArea">—</b><span id="appTotCost"></span></div>
   <div class="spacer"></div>
   <div class="seg" id="unitseg">
     <button data-unit="ft" class="on">ft²</button>
@@ -373,6 +475,8 @@
     <button id="zout">–</button><span class="val mono" id="zval">100%</span><button id="zin">+</button>
   </div>
   <button class="hbtn" id="fit" title="Fit to view (F)">Fit</button>
+  <button class="hbtn" id="installApp" hidden title="Install this as an app on your device">⤓&nbsp;Install app</button>
+  <button class="hbtn" id="viewToggle" title="Switch between the full workspace and the simple app view">📱&nbsp;App view</button>
   <button class="hbtn" id="theme" title="Toggle theme" aria-label="Toggle theme">◐</button>
 </header>
 
@@ -429,6 +533,10 @@
   </div>
 
   <aside class="panel">
+    <button class="sheethandle" id="sheetHandle" type="button">
+      <span class="grip"></span>
+      <span class="sum" id="sheetSum">Spaces &amp; quote</span>
+    </button>
     <section class="sec" data-sec="source">
       <h3>Source <span class="zh">图纸</span><span class="chev">▾</span></h3>
       <div class="secbody">
@@ -553,6 +661,33 @@
     </div>
   </aside>
 </main>
+
+<nav class="appbar" id="appbar">
+  <button class="ab" data-mode="calibrate" type="button"><i>📏</i><span>Scale</span></button>
+  <button class="ab" data-mode="draw" type="button"><i>✏️</i><span>Room</span></button>
+  <button class="ab" data-mode="edit" type="button"><i>✥</i><span>Edit</span></button>
+  <button class="ab" id="abAuto" type="button"><i>⚡</i><span>Auto</span></button>
+  <button class="ab" id="abMore" type="button"><i>☰</i><span>More</span></button>
+</nav>
+
+<div class="moresheet" id="moreSheet" hidden>
+  <div class="card">
+    <span class="grip"></span>
+    <h4>More tools</h4>
+    <div class="grid">
+      <button data-mode="rect" type="button">▭&nbsp; Rectangle room</button>
+      <button data-mode="line" type="button">╱&nbsp; Linear item · per m</button>
+      <button data-mode="count" type="button">•&nbsp; Count item · per pc</button>
+      <button data-mode="measure" type="button">⟺&nbsp; Ruler</button>
+      <button data-mode="pan" type="button">✋&nbsp; Pan / move plan</button>
+      <button id="msUnit" type="button">⇄&nbsp; Switch ft² / m²</button>
+      <button id="msScan" type="button">🔍&nbsp; Scan for dimensions</button>
+      <button id="msOpen" type="button">📂&nbsp; Open another plan</button>
+      <button id="msEnhance" type="button">✨&nbsp; Auto-enhance image</button>
+      <button id="msExport" type="button">📤&nbsp; Copy / save quote</button>
+    </div>
+  </div>
+</div>
 
 <input type="file" id="file" accept=".jpg,.jpeg,.png,.webp,.pdf,image/*,application/pdf" style="display:none" />
 <div class="toast" id="toast"></div>
@@ -2423,6 +2558,7 @@
     if (state.meta.gst > 0 && t.sub > 0) { gRow.style.display = ""; $("#gstLbl").textContent = `+ GST ${state.meta.gst}%`; $("#gstVal").textContent = "$" + nf.format(Math.round(t.gst)); }
     else gRow.style.display = "none";
     $("#costVal").textContent = t.quote > 0 ? "$" + nf.format(Math.round(t.quote)) : "—";
+    syncAppBar(); updateAppShell(t);
   }
   function renderCounts() {
     $("#newCount").disabled = !state.mmPerPx;
@@ -2559,6 +2695,8 @@
     $$("#modes button").forEach((b) => b.classList.toggle("on", b.dataset.mode === m));
     cv.className = "mode-" + m;
     cv.style.cursor = "";
+    syncAppBar();
+    if (document.body.classList.contains("appui")) $(".panel").classList.remove("sheetopen");
     updateHud(); render();
   }
   $("#modes").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b && !b.disabled) setMode(b.dataset.mode); });
@@ -2569,11 +2707,13 @@
   $("#newMeasure").addEventListener("click", () => setMode("measure"));
   $("#addRef").addEventListener("click", () => setMode("calibrate"));
 
-  $("#unitseg").addEventListener("click", (e) => {
-    const b = e.target.closest("button"); if (!b) return;
-    state.units = b.dataset.unit;
-    $$("#unitseg button").forEach((x) => x.classList.toggle("on", x === b));
+  function setUnits(u) {
+    state.units = u;
+    $$("#unitseg button").forEach((x) => x.classList.toggle("on", x.dataset.unit === u));
     renderPanel(); render(); updateHud(); persist();
+  }
+  $("#unitseg").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (b) setUnits(b.dataset.unit);
   });
 
   $("#rate").addEventListener("input", (e) => { state.rate = parseFloat(e.target.value) || 0; renderPanel(); persist(); });
@@ -3304,6 +3444,100 @@
   $("#saveCsv").addEventListener("click", () => { if (reportReady()) save("takeoff.csv", buildCsv()); });
   $("#savePng").addEventListener("click", async () => { if (state.src) save("takeoff-annotated.png", await renderFullPng()); });
 
+  // ---------- app view (touch-first UI) + install ----------
+  const VIEW_KEY = "fb_view";
+  function isAppUI() { return document.body.classList.contains("appui"); }
+
+  function syncAppBar() {
+    const hasImg = !!state.src, hasScale = !!state.mmPerPx;
+    $$("#appbar .ab").forEach((b) => {
+      if (b.dataset.mode) b.classList.toggle("on", b.dataset.mode === state.mode);
+      if (b.id === "abMore") return;
+      if (b.dataset.mode === "calibrate" || b.dataset.mode === "edit" || b.dataset.mode === "pan") b.disabled = !hasImg;
+      else b.disabled = !hasScale; // draw, abAuto
+    });
+  }
+
+  function updateAppShell(t) {
+    t = t || totals();
+    const u2 = state.units === "ft" ? "ft²" : "m²";
+    const areaVal = state.spaces.length ? (state.units === "ft" ? t.totF : t.totM) : null;
+    const areaTxt = areaVal != null ? nf.format(Math.round(areaVal)) + " " + u2 : "—";
+    const costTxt = t.quote > 0 ? "$" + nf.format(Math.round(t.quote)) : "";
+    $("#appTotArea").textContent = areaTxt;
+    $("#appTotCost").textContent = costTxt;
+    $("#appTotal").style.visibility = areaVal != null ? "visible" : "hidden";
+    let sum;
+    if (!state.src) sum = "Open a floorplan to start";
+    else if (!state.mmPerPx) sum = "Step 1 — tap Scale, draw a known line";
+    else if (!state.spaces.length) sum = "Step 2 — tap Room and trace, or Auto";
+    else {
+      const n = state.spaces.length;
+      sum = n + (n > 1 ? " spaces" : " space") + " · " + areaTxt + (costTxt ? "  ·  " + costTxt : "");
+    }
+    $("#sheetSum").textContent = sum;
+  }
+
+  function setView(app) {
+    document.body.classList.toggle("appui", app);
+    $("#viewToggle").innerHTML = app ? "🖥&nbsp;Full view" : "📱&nbsp;App view";
+    if (!app) $(".panel").classList.remove("sheetopen");
+    try { localStorage.setItem(VIEW_KEY, app ? "1" : "0"); } catch (e) {}
+    syncAppBar(); updateAppShell();
+    requestAnimationFrame(() => { resize(); render(); });
+  }
+  $("#viewToggle").addEventListener("click", () => setView(!isAppUI()));
+
+  $("#appbar").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b || b.disabled) return;
+    if (b.id === "abMore") { $("#moreSheet").hidden = false; return; }
+    if (b.id === "abAuto") { detectRooms(); return; }
+    if (b.dataset.mode) setMode(b.dataset.mode);
+  });
+
+  $("#sheetHandle").addEventListener("click", () => {
+    $(".panel").classList.toggle("sheetopen");
+  });
+
+  $("#moreSheet").addEventListener("click", (e) => {
+    if (e.target.id === "moreSheet") { $("#moreSheet").hidden = true; return; }
+    const b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.mode) setMode(b.dataset.mode);
+    else if (b.id === "msUnit") setUnits(state.units === "ft" ? "m" : "ft");
+    else if (b.id === "msScan") { if (!$("#scanDims").disabled) $("#scanDims").click(); else toast("Open a plan first"); }
+    else if (b.id === "msOpen") $("#file").click();
+    else if (b.id === "msEnhance") $("#autoEnh").click();
+    else if (b.id === "msExport") { $(".panel").classList.add("sheetopen"); const ex = $('[data-sec="export"]'); if (ex) { ex.classList.remove("collapsed"); ex.scrollIntoView({ block: "center" }); } }
+    $("#moreSheet").hidden = true;
+  });
+
+  // ---- Install as an app (PWA) ----
+  let deferredPrompt = null;
+  const standalone = () => matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault(); deferredPrompt = e;
+    if (!standalone()) $("#installApp").hidden = false;
+  });
+  window.addEventListener("appinstalled", () => {
+    $("#installApp").hidden = true; deferredPrompt = null;
+    toast("Installed — open “Takeoff” from your home screen");
+  });
+  $("#installApp").addEventListener("click", async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      try { await deferredPrompt.userChoice; } catch (e) {}
+      deferredPrompt = null; $("#installApp").hidden = true;
+    } else if (/iphone|ipad|ipod/i.test(navigator.userAgent)) {
+      toast("iPhone/iPad: tap Share ⬆ in Safari, then “Add to Home Screen”");
+    } else {
+      toast("Use your browser menu → “Install app” / “Add to Home screen”");
+    }
+  });
+  if (!standalone() && /iphone|ipad|ipod/i.test(navigator.userAgent)) $("#installApp").hidden = false;
+  if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+    window.addEventListener("load", () => { navigator.serviceWorker.register("sw.js").catch(() => {}); });
+  }
+
   // ---------- boot ----------
   syncEnhInputs();
   syncMetaInputs();
@@ -3313,8 +3547,16 @@
   updateUndoUI();
   restoreSession();
 
+  // apply saved view choice; default to app view on a phone-sized screen the first time
+  (function initView() {
+    let pref = null;
+    try { pref = localStorage.getItem(VIEW_KEY); } catch (e) {}
+    const app = pref === "1" || (pref === null && matchMedia("(max-width: 720px)").matches);
+    setView(app);
+  })();
+
   if (location.hostname === "localhost" || location.protocol === "file:") {
-    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop };
+    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, setUnits, fit, resize };
   }
 })();
 </script>
