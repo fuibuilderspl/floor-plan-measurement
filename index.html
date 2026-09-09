@@ -681,6 +681,7 @@
       <button data-mode="count" type="button">•&nbsp; Count item · per pc</button>
       <button data-mode="measure" type="button">⟺&nbsp; Ruler</button>
       <button data-mode="pan" type="button">✋&nbsp; Pan / move plan</button>
+      <button id="msFit" type="button">⤢&nbsp; Fit plan to screen</button>
       <button id="msUnit" type="button">⇄&nbsp; Switch ft² / m²</button>
       <button id="msScan" type="button">🔍&nbsp; Scan for dimensions</button>
       <button id="msOpen" type="button">📂&nbsp; Open another plan</button>
@@ -1709,9 +1710,40 @@
   };
   let pointerDown = null, movedFar = false;
 
+  // ---- multi-touch pinch-zoom / two-finger pan ----
+  const pointers = new Map(); // pointerId -> {x,y} (screen px in the canvas)
+  let pinch = null;           // { dist, mid } while two or more fingers are down
+  function pinchState() {
+    const p = [...pointers.values()];
+    return {
+      dist: Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y),
+      mid: { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 },
+    };
+  }
+  function beginPinch() {
+    pinch = pinchState();
+    // pointer capture locks events to one finger — drop it so both fingers report
+    pointers.forEach((_, id) => { try { cv.releasePointerCapture(id); } catch (err) {} });
+    // abandon any single-finger action the first touch had started
+    state.panning = false; cv.classList.remove("panning");
+    state.dragTarget = null; state._dragMoved = false;
+    pointerDown = null; movedFar = true; // the follow-up pointerup must not count as a tap
+  }
+  function endPinchPointer(id) {
+    pointers.delete(id);
+    if (pinch && pointers.size < 2) {
+      pinch = null;
+      pointerDown = null; movedFar = true; // ignore the last finger until it lifts & re-presses
+      updateZoomLabel(); persist();
+    }
+  }
+  cv.addEventListener("pointercancel", (e) => endPinchPointer(e.pointerId));
+
   cv.addEventListener("pointerdown", (e) => {
     if (!state.src) return;
-    cv.setPointerCapture(e.pointerId);
+    try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+    if (e.pointerType === "touch" || e.pointerType === "pen") pointers.set(e.pointerId, evtPos(e));
+    if (pointers.size >= 2) { beginPinch(); return; }
     pointerDown = evtPos(e);
     movedFar = false;
     const wpt = Wld(pointerDown);
@@ -1733,6 +1765,22 @@
   cv.addEventListener("pointermove", (e) => {
     if (!state.src) return;
     const pos = evtPos(e);
+    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, pos);
+
+    if (pinch) {
+      if (pointers.size >= 2) {
+        const cur = pinchState();
+        const factor = pinch.dist > 0 ? cur.dist / pinch.dist : 1;
+        const anchor = Wld(pinch.mid); // world point under the previous midpoint
+        state.view.s = clamp(state.view.s * factor, 0.02, 40);
+        state.view.ox = cur.mid.x - anchor.x * state.view.s;
+        state.view.oy = cur.mid.y - anchor.y * state.view.s;
+        pinch = cur;
+        updateZoomLabel(); render();
+      }
+      return;
+    }
+
     if (pointerDown && dist(pos, pointerDown) > 3) movedFar = true;
 
     if (state.panning && pointerDown) {
@@ -1770,8 +1818,10 @@
   });
 
   cv.addEventListener("pointerup", (e) => {
-    if (!state.src) { pointerDown = null; return; }
+    if (!state.src) { pointerDown = null; pointers.delete(e.pointerId); return; }
     const pos = evtPos(e);
+    if (pinch || pointers.size >= 2) { endPinchPointer(e.pointerId); return; }
+    pointers.delete(e.pointerId);
     const wasPan = state.panning, drag = state.dragTarget;
     state.panning = false; state.dragTarget = null; cv.classList.remove("panning");
 
@@ -1795,6 +1845,13 @@
     if (state.mode === "draw" && state.draft.length >= 3) { closeDraft(); return; }
     if (state.mode === "line" && state.lineDraft.length >= 2) { finishLine(); return; }
     if (state.mode === "count" && state.countDraft.length) { finishCount(); return; }
+    if (/^(pan|calibrate|rect|measure)$/.test(state.mode) && state.src) {
+      // double-tap / double-click zoom: to ~2.5× at the point, or back to fit if already zoomed in
+      const p = evtPos(e), fitScale = Math.min((W() - 80) / state.iw, (H() - 80) / state.ih);
+      if (state.view.s > fitScale * 1.8) fit();
+      else zoomAt(2.5 / state.view.s, p.x, p.y);
+      return;
+    }
     if (state.mode === "edit" && state.src) {
       const ne = nearestEdge(evtPos(e));
       if (ne) {
@@ -3521,6 +3578,7 @@
     if (e.target.id === "moreSheet") { $("#moreSheet").hidden = true; return; }
     const b = e.target.closest("button"); if (!b) return;
     if (b.dataset.mode) setMode(b.dataset.mode);
+    else if (b.id === "msFit") { if (state.src) fit(); else toast("Open a plan first"); }
     else if (b.id === "msUnit") setUnits(state.units === "ft" ? "m" : "ft");
     else if (b.id === "msScan") { if (!$("#scanDims").disabled) $("#scanDims").click(); else toast("Open a plan first"); }
     else if (b.id === "msOpen") $("#file").click();
