@@ -360,6 +360,29 @@
   .appTotal span { color: var(--accent); font-size: 13px; font-weight: 600; }
   body.appui #undoredo button { width: 38px; height: 34px; font-size: 18px; }
 
+  /* guided step strip (app view) */
+  .stepbar { display: none; }
+  body.appui .stepbar {
+    display: flex; align-items: center; gap: 10px; flex: 0 0 auto;
+    min-height: 46px; padding: 7px 10px;
+    background: var(--accent-weak); border-bottom: 1px solid var(--accent-line);
+    font-size: 13px;
+  }
+  body.appui .stepbar.done { background: var(--teal-weak); border-bottom-color: var(--teal); }
+  .stepbar .num {
+    flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
+    background: var(--accent); color: var(--accent-ink);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 12px; font-family: var(--font-mono);
+  }
+  .stepbar.done .num { background: var(--teal); }
+  .stepbar .txt { flex: 1; line-height: 1.28; color: var(--ink); }
+  .stepbar .go {
+    flex: 0 0 auto; border: 0; background: var(--accent); color: var(--accent-ink);
+    border-radius: 8px; padding: 9px 13px; font-weight: 700; font-size: 12.5px; white-space: nowrap;
+  }
+  .stepbar.done .go { background: var(--teal); }
+
   /* bottom action bar — a normal flex row pinned at the foot of the app shell */
   .appbar {
     flex: 0 0 auto; position: relative; z-index: 47;
@@ -480,6 +503,12 @@
   <button class="hbtn" id="viewToggle" title="Switch between the full workspace and the simple app view">📱&nbsp;App view</button>
   <button class="hbtn" id="theme" title="Toggle theme" aria-label="Toggle theme">◐</button>
 </header>
+
+<div class="stepbar" id="stepBar">
+  <span class="num" id="stepNum">1</span>
+  <span class="txt" id="stepTxt">Upload the client's floor plan</span>
+  <button class="go" id="stepGo" type="button">Open file</button>
+</div>
 
 <main>
   <div class="stage" id="stage">
@@ -1708,7 +1737,7 @@
     const r = cv.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
-  let pointerDown = null, movedFar = false;
+  let pointerDown = null, movedFar = false, tapSlop = 3;
 
   // ---- multi-touch pinch-zoom / two-finger pan ----
   const pointers = new Map(); // pointerId -> {x,y} (screen px in the canvas)
@@ -1737,15 +1766,23 @@
       updateZoomLabel(); persist();
     }
   }
+  // catch releases that happen off the canvas (iOS can drop pointerup/pointercancel on cv)
+  const dropPointer = (e) => { if (pointers.has(e.pointerId)) endPinchPointer(e.pointerId); };
+  window.addEventListener("pointerup", dropPointer);
+  window.addEventListener("pointercancel", dropPointer);
   cv.addEventListener("pointercancel", (e) => endPinchPointer(e.pointerId));
 
   cv.addEventListener("pointerdown", (e) => {
     if (!state.src) return;
     try { cv.setPointerCapture(e.pointerId); } catch (err) {}
-    if (e.pointerType === "touch" || e.pointerType === "pen") pointers.set(e.pointerId, evtPos(e));
+    if (e.pointerType === "touch" || e.pointerType === "pen") {
+      if (e.isPrimary) { pointers.clear(); pinch = null; } // a fresh gesture — drop any stragglers
+      pointers.set(e.pointerId, evtPos(e));
+    }
     if (pointers.size >= 2) { beginPinch(); return; }
     pointerDown = evtPos(e);
     movedFar = false;
+    tapSlop = (e.pointerType === "touch" ? 16 : 3);
     const wpt = Wld(pointerDown);
 
     if (e.button === 2) return; // right button is handled by contextmenu (delete)
@@ -1781,7 +1818,14 @@
       return;
     }
 
-    if (pointerDown && dist(pos, pointerDown) > 3) movedFar = true;
+    if (pointerDown && !movedFar && dist(pos, pointerDown) > tapSlop) {
+      movedFar = true;
+      // a clear one-finger drag pans the plan in ANY mode (not just Pan mode),
+      // so you can reposition between taps without leaving the tool
+      if (!state.panning && !state.dragTarget) {
+        state.panning = true; cv.classList.add("panning"); pointerDown = pos;
+      }
+    }
 
     if (state.panning && pointerDown) {
       state.view.ox += pos.x - pointerDown.x;
@@ -1793,7 +1837,7 @@
     if (state.dragTarget && state.mode === "edit") {
       const t = state.dragTarget;
       let w = Wld(pos);
-      if (t.type === "space" && !state._dragMoved && dist(pos, pointerDown) < 4) return; // click, not a move yet
+      if (t.type === "space" && !state._dragMoved && dist(pos, pointerDown) < tapSlop) return; // click, not a move yet
       if (!state._dragMoved) { pushHistory(); state._dragMoved = true; }
       if (t.type === "vertex") { w = snap(w, { si: t.si, vi: t.vi }) || w; state.spaces[t.si].pts[t.vi] = { x: w.x, y: w.y }; }
       else if (t.type === "lvertex") { w = snap(w) || snapEdge(w) || w; state.lines[t.li].pts[t.vi] = { x: w.x, y: w.y }; }
@@ -3525,16 +3569,48 @@
     $("#appTotArea").textContent = areaTxt;
     $("#appTotCost").textContent = costTxt;
     $("#appTotal").style.visibility = areaVal != null ? "visible" : "hidden";
-    let sum;
-    if (!state.src) sum = "Open a floorplan to start";
-    else if (!state.mmPerPx) sum = "Step 1 — tap Scale, draw a known line";
-    else if (!state.spaces.length) sum = "Step 2 — tap Room and trace, or Auto";
-    else {
-      const n = state.spaces.length;
-      sum = n + (n > 1 ? " spaces" : " space") + " · " + areaTxt + (costTxt ? "  ·  " + costTxt : "");
-    }
-    $("#sheetSum").textContent = sum;
+    const n0 = state.spaces.length;
+    $("#sheetSum").textContent = n0
+      ? n0 + (n0 > 1 ? " spaces" : " space") + " · " + areaTxt + (costTxt ? "  ·  " + costTxt : "")
+      : (!state.src ? "Open a floor plan to start" : !state.mmPerPx ? "Next: set the scale" : "Next: trace a room");
+    updateSteps(t);
   }
+
+  // guided 1-2-3 flow shown at the top in app view
+  function updateSteps(t) {
+    const bar = $("#stepBar"); if (!bar) return;
+    let num, txt, btn, act, done = false;
+    if (!state.src) {
+      num = "1"; txt = "Upload the client's floor plan (JPG / PNG / PDF)";
+      btn = "Open file"; act = () => $("#file").click();
+    } else if (!state.mmPerPx) {
+      num = "2"; txt = "Draw a line over a known length — a door ≈ 900 mm. Pinch to zoom in first.";
+      btn = "Draw line"; act = () => { setMode("calibrate"); toast("Tap one end of a known length, then the other end"); };
+    } else if (!state.spaces.length) {
+      num = "3"; txt = "Trace each room — tap the corners. Or tap Auto to detect them.";
+      btn = "Trace"; act = () => setMode("draw");
+    } else {
+      done = true; num = "✓";
+      t = t || totals();
+      const a = state.units === "ft" ? t.totF : t.totM, u2 = state.units === "ft" ? "ft²" : "m²";
+      txt = state.spaces.length + (state.spaces.length > 1 ? " rooms" : " room") + " · " + a.toFixed(0) + " " + u2
+        + " — add wall/door items or open the quote";
+      btn = "Quote"; act = () => {
+        $(".panel").classList.add("sheetopen");
+        const ex = $('[data-sec="export"]'); if (ex) { ex.classList.remove("collapsed"); ex.scrollIntoView({ block: "center" }); }
+      };
+    }
+    $("#stepNum").textContent = num;
+    $("#stepTxt").textContent = txt;
+    $("#stepGo").textContent = btn;
+    bar.classList.toggle("done", done);
+    bar._act = act;
+    if (isAppUI()) requestAnimationFrame(() => {
+      const h = Math.round(bar.getBoundingClientRect().height);
+      if (bar._h !== h) { bar._h = h; resize(); }
+    });
+  }
+  $("#stepGo").addEventListener("click", () => { const b = $("#stepBar"); if (b && b._act) b._act(); });
 
   const PEEK = 76; // px of the sheet handle visible when collapsed
   function measureShell() {
@@ -3632,7 +3708,7 @@
   })();
 
   if (location.hostname === "localhost" || location.protocol === "file:") {
-    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, setUnits, fit, resize };
+    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize };
   }
 })();
 </script>
