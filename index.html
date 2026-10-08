@@ -346,6 +346,22 @@
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+  /* PDF page pager + picker */
+  .pager { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pager .mono { font-size: 12px; color: var(--ink-soft); }
+  .pgmodal { position: fixed; inset: 0; z-index: 70; background: var(--bg); display: flex; flex-direction: column; }
+  .pgmodal[hidden] { display: none !important; }
+  .pghead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: var(--surface); border-bottom: 1px solid var(--line); }
+  .pghead b { font-family: var(--font-head); font-size: 14px; word-break: break-all; }
+  .pggrid { flex: 1; overflow-y: auto; padding: 14px; display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); align-content: start; }
+  .pgcard { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 170px; padding: 6px; background: #fff; border: 2px solid var(--line); border-radius: 10px; cursor: pointer; color: #555; }
+  .pgcard:hover, .pgcard:active { border-color: var(--accent); }
+  .pgcard.cur { border-color: var(--teal); }
+  .pgcard canvas { width: 100%; height: auto; display: block; }
+  .pgcard .pgph { font-size: 11px; color: #999; padding: 40px 0; text-align: center; }
+  .pgcard .pgn { position: absolute; left: 6px; top: 6px; background: rgba(20, 24, 28, 0.78); color: #fff; font: 600 11px var(--font-mono); padding: 1px 6px; border-radius: 999px; }
+  @media (max-width: 720px) { .pggrid { grid-template-columns: repeat(2, 1fr); } }
+
   /* ============ APP VIEW (touch-first) ============ */
   .appbar, .moresheet, .sheethandle, .appTotal { display: none; }
   #installApp[hidden] { display: none; }
@@ -575,6 +591,12 @@
           <button class="btn ghost sm" id="clearImg" disabled>Remove</button>
         </div>
         <div class="note" id="fileInfo">No file loaded.</div>
+        <div class="pager" id="pdfPager" style="display:none">
+          <button class="btn sm" id="pgPrev" type="button" aria-label="Previous page">◀</button>
+          <span class="mono" id="pgLbl">Page 1 / 1</span>
+          <button class="btn sm" id="pgNext" type="button" aria-label="Next page">▶</button>
+          <button class="btn sm" id="pgPick" type="button">All pages…</button>
+        </div>
         <div class="note" id="pdfNote" style="display:none"></div>
       </div>
     </section>
@@ -720,6 +742,14 @@
   </div>
 </div>
 
+<div class="pgmodal" id="pgModal" hidden>
+  <div class="pghead">
+    <div><b id="pgTitle">PDF</b><div class="note" id="pgSub"></div></div>
+    <button class="btn sm" id="pgClose" type="button">Cancel</button>
+  </div>
+  <div class="pggrid" id="pgGrid"></div>
+</div>
+
 <input type="file" id="file" accept=".jpg,.jpeg,.png,.webp,.pdf,image/*,application/pdf" style="display:none" />
 <div class="toast" id="toast"></div>
 
@@ -772,6 +802,7 @@
     snapPt: null,        // {x,y} world — live snap indicator
     snapKind: null,      // "corner" | "edge"
     guides: [],          // [{axis:'x'|'y', at}] alignment guides
+    pdfPage: 0,          // index of the page shown from the open PDF
     loupe: true,         // magnifier while placing points
     srcBlob: null,       // PNG blob of the loaded image (for session restore)
     rate: 0,             // currency per area unit (matches state.units)
@@ -2944,64 +2975,121 @@
     if (it) loadFile(it.getAsFile(), "Pasted image");
   });
 
+  // a PDF kept open after loading so the user can flip to another page without re-opening the file
+  let curPdf = null;
+
+  function pdfPagerUI() {
+    const n = curPdf ? curPdf.pages.length : 0;
+    $("#pdfPager").style.display = n > 1 ? "flex" : "none";
+    if (n > 1) {
+      $("#pgLbl").textContent = `Page ${state.pdfPage + 1} / ${n}`;
+      $("#pgPrev").disabled = state.pdfPage <= 0;
+      $("#pgNext").disabled = state.pdfPage >= n - 1;
+    }
+  }
+  const hasWork = () => state.spaces.length || state.refs.length || state.lines.length || state.counts.length;
+
   async function loadFile(file, nameOverride) {
     const name = nameOverride || file.name || "image";
     $("#pdfNote").style.display = "none";
     try {
-      let bmp;
+      let bmp, title = name, pdfNote = null;
       if (/pdf$/i.test(file.type) || /\.pdf$/i.test(name)) {
         toast("Reading PDF…");
         const abuf = await file.arrayBuffer();
-        const res = await extractRasterFromPDF(abuf);
-        if (res) {
-          bmp = res.bitmap;
-          if (res.note) { $("#pdfNote").style.display = "block"; $("#pdfNote").textContent = res.note; }
-        } else {
-          // no embedded raster — try drawing the vector page ourselves
-          const vc = await renderVectorPdf(abuf).catch(() => null);
-          if (!vc) {
-            $("#pdfNote").style.display = "block";
-            $("#pdfNote").innerHTML = "⚠️ Couldn't read this PDF (unusual structure). Open it in a PDF viewer and <b>export the page as PNG or JPG</b>, then load that.";
-            toast("Couldn't read that PDF — export as image");
-            return;
-          }
-          bmp = await createImageBitmap(vc);
+        const pdf = await openPdf(abuf);
+        if (!pdf.pages.length) {
           $("#pdfNote").style.display = "block";
-          $("#pdfNote").innerHTML = "✓ Drawn from the vector PDF. If any lines look missing, export the page as an image from your PDF viewer instead.";
+          $("#pdfNote").innerHTML = "⚠️ Couldn't read this PDF (unusual structure). Open it in a PDF viewer and <b>export the page as PNG or JPG</b>, then load that.";
+          toast("Couldn't read that PDF — export as image");
+          return;
         }
+        let idx = 0;
+        if (pdf.pages.length > 1) {
+          idx = await pickPdfPage(pdf, name, 0);
+          if (idx == null) return; // cancelled
+        }
+        toast("Drawing page " + (idx + 1) + "…");
+        const res = await pdfPageBitmap(pdf, idx);
+        if (!res) {
+          $("#pdfNote").style.display = "block";
+          $("#pdfNote").innerHTML = "⚠️ Couldn't draw that page (unusual structure). Pick another page, or open it in a PDF viewer and <b>export it as PNG or JPG</b>.";
+          toast("Couldn't draw that page");
+          curPdf = pdf; state.pdfPage = idx; pdfPagerUI();
+          return;
+        }
+        bmp = res.bitmap;
+        curPdf = pdf; state.pdfPage = idx;
+        if (pdf.pages.length > 1) title = `${name} · p.${idx + 1}`;
+        pdfNote = res.kind === "scan"
+          ? "Scanned PDF — using the page's picture."
+          : "✓ Drawn from the vector PDF. If any lines look missing, export the page as an image from your PDF viewer instead.";
       } else {
+        curPdf = null;
         bmp = await createImageBitmap(file);
       }
-      bmp = await downscale(bmp, 3400);
-      state.src = bmp;
-      state.iw = bmp.width; state.ih = bmp.height;
-      state.enhanced = null;
-      state.fileName = name;
-      state.refs = []; state.spaces = []; state.lines = []; state.counts = []; state.measures = [];
-      state.draft = []; state.lineDraft = []; state.countDraft = []; state.scanCands = []; state.pendingRefVal = null;
-      state.selId = null; state.mmPerPx = null; state.rectStart = null; state.measTmp = null;
-      undoStack = []; redoStack = []; updateUndoUI();
-      state.enh = { bright: 1, contrast: 1, sharp: 0, thresh: 0, gray: false };
-      syncEnhInputs();
-      // keep a PNG copy for session restore
-      try {
-        const cc = document.createElement("canvas"); cc.width = bmp.width; cc.height = bmp.height;
-        cc.getContext("2d").drawImage(bmp, 0, 0);
-        state.srcBlob = await new Promise((r) => cc.toBlob(r, "image/png"));
-      } catch (e) { state.srcBlob = null; }
-      $("#empty").classList.add("hide");
-      $("#fileInfo").innerHTML = `<b>${escapeHtml(name)}</b><br>${bmp.width} × ${bmp.height} px on screen`;
-      $("#clearImg").disabled = false;
-      applyEnhance();
-      fit();
-      renderPanel();
-      setMode("calibrate");
-      persist();
-      toast("Loaded · now set the scale");
+      await adoptBitmap(bmp, title);
+      if (pdfNote) { $("#pdfNote").style.display = "block"; $("#pdfNote").textContent = pdfNote; }
+      pdfPagerUI();
     } catch (err) {
       console.error(err);
       toast("Could not read that file");
     }
+  }
+
+  // switch to another page of the already-open PDF
+  let pdfBusy = false;
+  async function gotoPdfPage(idx) {
+    if (pdfBusy || !curPdf || idx < 0 || idx >= curPdf.pages.length || idx === state.pdfPage) return;
+    if (hasWork() && !confirm("Switching page clears the current scale, rooms and measurements. Continue?")) return;
+    pdfBusy = true;
+    try {
+      toast("Drawing page " + (idx + 1) + "…");
+      const res = await pdfPageBitmap(curPdf, idx).catch(() => null);
+      if (!res) { toast("Couldn't draw page " + (idx + 1)); return; }
+      state.pdfPage = idx; pdfPagerUI();
+      const base = (state.fileName || "PDF").replace(/ · p\.\d+$/, "");
+      await adoptBitmap(res.bitmap, `${base} · p.${idx + 1}`);
+      $("#pdfNote").style.display = "block";
+      $("#pdfNote").textContent = res.kind === "scan" ? "Scanned PDF — using the page's picture." : "✓ Drawn from the vector PDF. If any lines look missing, export the page as an image from your PDF viewer instead.";
+    } finally { pdfBusy = false; pdfPagerUI(); }
+  }
+  $("#pgPrev").addEventListener("click", () => gotoPdfPage(state.pdfPage - 1));
+  $("#pgNext").addEventListener("click", () => gotoPdfPage(state.pdfPage + 1));
+  $("#pgPick").addEventListener("click", async () => {
+    if (!curPdf) return;
+    const idx = await pickPdfPage(curPdf, (state.fileName || "PDF").replace(/ · p\.\d+$/, ""), state.pdfPage);
+    if (idx != null) gotoPdfPage(idx);
+  });
+
+  // make a bitmap the current plan (shared by images, PDFs and PDF page switches)
+  async function adoptBitmap(bmp, name) {
+    bmp = await downscale(bmp, 3400);
+    state.src = bmp;
+    state.iw = bmp.width; state.ih = bmp.height;
+    state.enhanced = null;
+    state.fileName = name;
+    state.refs = []; state.spaces = []; state.lines = []; state.counts = []; state.measures = [];
+    state.draft = []; state.lineDraft = []; state.countDraft = []; state.scanCands = []; state.pendingRefVal = null;
+    state.selId = null; state.mmPerPx = null; state.rectStart = null; state.measTmp = null;
+    undoStack = []; redoStack = []; updateUndoUI();
+    state.enh = { bright: 1, contrast: 1, sharp: 0, thresh: 0, gray: false };
+    syncEnhInputs();
+    // keep a PNG copy for session restore
+    try {
+      const cc = document.createElement("canvas"); cc.width = bmp.width; cc.height = bmp.height;
+      cc.getContext("2d").drawImage(bmp, 0, 0);
+      state.srcBlob = await new Promise((r) => cc.toBlob(r, "image/png"));
+    } catch (e) { state.srcBlob = null; }
+    $("#empty").classList.add("hide");
+    $("#fileInfo").innerHTML = `<b>${escapeHtml(name)}</b><br>${bmp.width} × ${bmp.height} px on screen`;
+    $("#clearImg").disabled = false;
+    applyEnhance();
+    fit();
+    renderPanel();
+    setMode("calibrate");
+    persist();
+    toast("Loaded · now set the scale");
   }
   $("#clearImg").addEventListener("click", () => {
     if ((state.spaces.length || state.refs.length) && !confirm("Remove the plan and clear all spaces, references and measurements?")) return;
@@ -3013,6 +3101,7 @@
     $("#empty").classList.remove("hide");
     $("#fileInfo").textContent = "No file loaded.";
     $("#pdfNote").style.display = "none";
+    curPdf = null; state.pdfPage = 0; pdfPagerUI();
     IDB.del("session");
     renderPanel(); render(); setMode("pan");
   });
@@ -3037,62 +3126,6 @@
     }
     return null;
   }
-  async function extractRasterFromPDF(buf) {
-    const bytes = new Uint8Array(buf);
-    let latin = "";
-    const CH = 32768;
-    for (let i = 0; i < bytes.length; i += CH) latin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
-    const cands = [];
-    const re = /\/Subtype\s*\/Image/g;
-    let m;
-    while ((m = re.exec(latin))) {
-      const dictStart = latin.lastIndexOf("<<", m.index);
-      const sIdx = latin.indexOf("stream", m.index);
-      if (sIdx < 0 || dictStart < 0) continue;
-      const dict = latin.slice(dictStart, sIdx);
-      const gi = (r) => { const x = r.exec(dict); return x ? x[1] : null; };
-      const w = +gi(/\/Width\s+(\d+)/), h = +gi(/\/Height\s+(\d+)/);
-      const filter = gi(/\/Filter\s*\/(\w+)/) || gi(/\/Filter\s*\[\s*\/(\w+)/);
-      const bpc = +(gi(/\/BitsPerComponent\s+(\d+)/) || 8);
-      const cs = gi(/\/ColorSpace\s*\/(\w+)/);
-      let s = sIdx + 6;
-      if (bytes[s] === 13) s++;
-      if (bytes[s] === 10) s++;
-      let e = latin.indexOf("endstream", s);
-      if (e < 0) continue;
-      let end = e;
-      if (bytes[end - 1] === 10) end--;
-      if (bytes[end - 1] === 13) end--;
-      cands.push({ w, h, filter, bpc, cs, data: bytes.slice(s, end), area: (w || 0) * (h || 0) });
-    }
-    cands.sort((a, b) => b.area - a.area);
-    for (const im of cands) {
-      try {
-        if (im.filter === "DCTDecode") {
-          return { bitmap: await createImageBitmap(new Blob([im.data], { type: "image/jpeg" })) };
-        }
-        if (im.filter === "FlateDecode" && im.w && im.h) {
-          const raw = await inflate(im.data);
-          if (!raw) continue;
-          const nc = im.cs === "DeviceRGB" ? 3 : im.cs === "DeviceGray" ? 1 : Math.max(1, Math.round(raw.length / (im.w * im.h)));
-          if (im.bpc !== 8) continue;
-          const c = document.createElement("canvas"); c.width = im.w; c.height = im.h;
-          const g = c.getContext("2d");
-          const out = g.createImageData(im.w, im.h);
-          for (let i = 0; i < im.w * im.h; i++) {
-            const p = i * 4;
-            if (nc >= 3) { out.data[p] = raw[i * nc]; out.data[p + 1] = raw[i * nc + 1]; out.data[p + 2] = raw[i * nc + 2]; }
-            else { const v = raw[i * nc]; out.data[p] = out.data[p + 1] = out.data[p + 2] = v; }
-            out.data[p + 3] = 255;
-          }
-          g.putImageData(out, 0, 0);
-          return { bitmap: await createImageBitmap(c) };
-        }
-      } catch (e) { console.warn("pdf image decode failed", e); }
-    }
-    return null;
-  }
-
   // ---------- minimal vector-PDF page renderer (no library) ----------
   function bytesToLatin(u8) {
     let s = ""; const C = 16384;
@@ -3138,7 +3171,32 @@
     return toks;
   }
 
-  async function renderVectorPdf(buf) {
+  // ---------- PDF reader: page tree + vector page renderer (no library) ----------
+  function a85decode(u8) {
+    const out = []; let grp = [], i = 0;
+    const s = bytesToLatin(u8).replace(/\s+/g, "");
+    let t = s.startsWith("<~") ? s.slice(2) : s;
+    const e = t.indexOf("~>"); if (e >= 0) t = t.slice(0, e);
+    for (i = 0; i < t.length; i++) {
+      const c = t[i];
+      if (c === "z" && !grp.length) { out.push(0, 0, 0, 0); continue; }
+      grp.push(t.charCodeAt(i) - 33);
+      if (grp.length === 5) {
+        let v = 0; for (const d of grp) v = v * 85 + d;
+        out.push((v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255); grp = [];
+      }
+    }
+    if (grp.length > 1) {
+      const n = grp.length; while (grp.length < 5) grp.push(84);
+      let v = 0; for (const d of grp) v = v * 85 + d;
+      const b4 = [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
+      for (let k = 0; k < n - 1; k++) out.push(b4[k]);
+    }
+    return new Uint8Array(out);
+  }
+
+  // index a PDF: objects, the real page order (walk /Root → /Pages → /Kids), stream decoder
+  async function openPdf(buf) {
     const bytes = new Uint8Array(buf);
     const latin = bytesToLatin(bytes);
     const objs = {};
@@ -3148,9 +3206,11 @@
       const num = +om[1], start = om.index + om[0].length;
       const end = latin.indexOf("endobj", start);
       if (end < 0) continue;
-      objs[num] = { start, end, body: latin.slice(start, end) };
+      objs[num] = { start, end, body: latin.slice(start, end) }; // a later revision of the same number wins
     }
-    async function streamOf(num) {
+    const pdf = { bytes, latin, objs, pages: [] };
+
+    pdf.stream = async (num) => {
       const o = objs[num]; if (!o) return null;
       const si = latin.indexOf("stream", o.start);
       if (si < 0 || si > o.end) return null;
@@ -3159,50 +3219,98 @@
       if (bytes[s] === 10) s++;
       const e = latin.indexOf("endstream", s);
       if (e < 0) return null;
-      let end = e;
-      if (bytes[end - 1] === 10) end--;
-      if (bytes[end - 1] === 13) end--;
-      const raw = bytes.slice(s, end);
       const dict = o.body.slice(0, si - o.start);
-      if (/\/FlateDecode/.test(dict)) { const inf = await inflate(raw); return inf || raw; }
-      return raw;
-    }
+      let end = e;
+      // trust a direct /Length when it lands right on "endstream" (a data byte may legitimately be 0x0A/0x0D)
+      const lm = /\/Length\s+(\d+)(?!\s+\d+\s+R)/.exec(dict);
+      if (lm && /^\s*endstream/.test(latin.slice(s + +lm[1], s + +lm[1] + 12))) end = s + +lm[1];
+      else {
+        if (bytes[end - 1] === 10) end--;
+        if (bytes[end - 1] === 13) end--;
+      }
+      let data = bytes.slice(s, end);
+      const fm = /\/Filter\s*(\[[^\]]*\]|\/\w+)/.exec(dict);
+      const filters = fm ? (fm[1].match(/\/(\w+)/g) || []).map((x) => x.slice(1)) : [];
+      for (const f of filters) {
+        if (f === "FlateDecode" || f === "Fl") data = (await inflate(data)) || data;
+        else if (f === "ASCII85Decode" || f === "A85") data = a85decode(data);
+        else break; // DCT etc. are handled by the caller
+      }
+      return data;
+    };
 
-    let pageNum = null;
-    for (const k in objs) {
-      if (/\/Type\s*\/Page(?![a-zA-Z])/.test(objs[k].body) && !/\/Type\s*\/Pages/.test(objs[k].body)) { pageNum = +k; break; }
+    // page order from the active catalog (last /Root in the file = newest revision)
+    const pageSet = [];
+    let rootNum = null;
+    const rr = [...latin.matchAll(/\/Root\s+(\d+)\s+\d+\s+R/g)];
+    if (rr.length) rootNum = +rr[rr.length - 1][1];
+    const pagesRefOf = (n) => { const o = objs[n]; const m = o && /\/Pages\s+(\d+)\s+\d+\s+R/.exec(o.body); return m ? +m[1] : null; };
+    function walk(n, depth) {
+      const o = objs[n]; if (!o || depth > 12) return;
+      const isNode = /\/Type\s*\/Pages\b/.test(o.body) || /\/Kids\s*\[/.test(o.body);
+      if (isNode) {
+        const km = /\/Kids\s*\[([^\]]*)\]/.exec(o.body);
+        if (km) for (const r of km[1].matchAll(/(\d+)\s+\d+\s+R/g)) walk(+r[1], depth + 1);
+      } else pageSet.push(n);
     }
-    if (pageNum == null) return null;
+    const pn = rootNum != null ? pagesRefOf(rootNum) : null;
+    if (pn != null) walk(pn, 0);
+    if (!pageSet.length) { // damaged tree — fall back to any /Type /Page object in file order
+      for (const k of Object.keys(objs).map(Number).sort((a, b) => a - b)) {
+        if (/\/Type\s*\/Page(?![a-zA-Z])/.test(objs[k].body)) pageSet.push(k);
+      }
+    }
+    pdf.pages = pageSet;
+    return pdf;
+  }
+
+  // look up an inheritable page attribute (MediaBox, Rotate, Resources) up the /Parent chain
+  function pdfInherit(pdf, num, re, d) {
+    d = d || 0;
+    if (num == null || d > 10 || !pdf.objs[num]) return null;
+    const m = re.exec(pdf.objs[num].body);
+    if (m) return m;
+    const pm = /\/Parent\s+(\d+)\s+\d+\s+R/.exec(pdf.objs[num].body);
+    return pm ? pdfInherit(pdf, +pm[1], re, d + 1) : null;
+  }
+
+  // draw one page's vector content. maxPx = longest side of the result.
+  async function renderVectorPage(pdf, pageNum, maxPx) {
+    const objs = pdf.objs;
     const pb = objs[pageNum].body;
-
-    function mbox(num, d) {
-      if (num == null || d > 8 || !objs[num]) return null;
-      const mm = objs[num].body.match(/\/MediaBox\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
-      if (mm) return [+mm[1], +mm[2], +mm[3], +mm[4]];
-      const pm = objs[num].body.match(/\/Parent\s+(\d+)\s+\d+\s+R/);
-      return pm ? mbox(+pm[1], d + 1) : null;
-    }
-    const mb = mbox(pageNum, 0) || [0, 0, 612, 792];
+    const mm = pdfInherit(pdf, pageNum, /\/MediaBox\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
+    const mb = mm ? [+mm[1], +mm[2], +mm[3], +mm[4]] : [0, 0, 612, 792];
     const mbw = mb[2] - mb[0], mbh = mb[3] - mb[1];
     if (!(mbw > 0 && mbh > 0)) return null;
+    const rm = pdfInherit(pdf, pageNum, /\/Rotate\s+(-?\d+)/);
+    const rot = rm ? (((+rm[1] % 360) + 360) % 360) : 0;
 
     let nums = [];
     const cA = pb.match(/\/Contents\s*\[([^\]]+)\]/);
     const cS = pb.match(/\/Contents\s+(\d+)\s+\d+\s+R/);
     if (cA) nums = (cA[1].match(/(\d+)\s+\d+\s+R/g) || []).map((x) => +x.match(/\d+/)[0]);
-    else if (cS) nums = [+cS[1]];
+    else if (cS) {
+      const co = objs[+cS[1]];
+      if (co && /^\s*\[/.test(co.body)) nums = (co.body.match(/(\d+)\s+\d+\s+R/g) || []).map((x) => +x.match(/\d+/)[0]); // /Contents → an array object
+      else nums = [+cS[1]];
+    }
     if (!nums.length) return null;
 
     let content = "";
-    for (const cn of nums) { const st = await streamOf(cn); if (st) content += bytesToLatin(st) + "\n"; }
+    for (const cn of nums) { const st = await pdf.stream(cn); if (st) content += bytesToLatin(st) + "\n"; }
     if (content.length < 20) return null;
 
-    const s = clamp(2600 / Math.max(mbw, mbh), 1, 6);
+    const s = clamp(maxPx / Math.max(mbw, mbh), 0.05, 6);
+    const swap = rot === 90 || rot === 270;
     const c = document.createElement("canvas");
-    c.width = Math.round(mbw * s); c.height = Math.round(mbh * s);
+    c.width = Math.max(1, Math.round((swap ? mbh : mbw) * s));
+    c.height = Math.max(1, Math.round((swap ? mbw : mbh) * s));
     const g = c.getContext("2d");
     g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
-    g.setTransform(s, 0, 0, -s, -mb[0] * s, mb[3] * s);
+    if (rot === 90) g.setTransform(0, s, s, 0, -mb[1] * s, -mb[0] * s);
+    else if (rot === 180) g.setTransform(-s, 0, 0, s, mb[2] * s, -mb[1] * s);
+    else if (rot === 270) g.setTransform(0, -s, -s, 0, mb[3] * s, mb[2] * s);
+    else g.setTransform(s, 0, 0, -s, -mb[0] * s, mb[3] * s);
     g.lineCap = "round"; g.lineJoin = "round";
     g.strokeStyle = "#000"; g.fillStyle = "#000";
     g.beginPath();
@@ -3266,8 +3374,105 @@
       }
       vals.length = 0;
     }
-    if (!drew) return null;
+    if (drew < 3) return null;
     return c;
+  }
+
+  // scanned PDFs: the page IS one big picture. Only look at images this page actually uses,
+  // never at soft-mask / alpha helper images.
+  async function rasterFromPage(pdf, pageNum) {
+    const objs = pdf.objs, pb = objs[pageNum].body;
+    const names = [];
+    const xm = /\/XObject\s*<<([^>]*)>>/.exec(pb) || (() => {
+      const r = pdfInherit(pdf, pageNum, /\/Resources\s+(\d+)\s+\d+\s+R/);
+      const ro = r && objs[+r[1]];
+      return ro ? /\/XObject\s*<<([^>]*)>>/.exec(ro.body) : null;
+    })();
+    if (xm) for (const r of xm[1].matchAll(/\/\S+\s+(\d+)\s+\d+\s+R/g)) names.push(+r[1]);
+    const cands = [];
+    for (const n of names) {
+      const o = objs[n]; if (!o || !/\/Subtype\s*\/Image/.test(o.body)) continue;
+      const hdr = o.body.slice(0, Math.max(0, o.body.indexOf("stream")));
+      const gi = (re) => { const x = re.exec(hdr); return x ? x[1] : null; };
+      const w = +gi(/\/Width\s+(\d+)/), h = +gi(/\/Height\s+(\d+)/);
+      const fm = /\/Filter\s*(\[[^\]]*\]|\/\w+)/.exec(hdr);
+      const filters = fm ? (fm[1].match(/\/(\w+)/g) || []).map((x) => x.slice(1)) : [];
+      cands.push({ n, w, h, filters, bpc: +(gi(/\/BitsPerComponent\s+(\d+)/) || 8), cs: gi(/\/ColorSpace\s*\/(\w+)/), mask: /\/ImageMask\s+true/.test(hdr) });
+    }
+    // anything referenced as /SMask or /Mask of another image is just alpha
+    const maskNums = new Set();
+    for (const c of cands) { const m = /\/(?:SMask|Mask)\s+(\d+)\s+\d+\s+R/.exec(objs[c.n].body); if (m) maskNums.add(+m[1]); }
+    const real = cands.filter((c) => !maskNums.has(c.n) && !c.mask && c.w * c.h > 250000).sort((a, b) => b.w * b.h - a.w * a.h);
+    for (const im of real) {
+      try {
+        const data = await pdf.stream(im.n);
+        if (im.filters.includes("DCTDecode")) {
+          return await createImageBitmap(new Blob([data], { type: "image/jpeg" }));
+        }
+        if (im.bpc === 8 && (im.cs === "DeviceRGB" || im.cs === "DeviceGray") && im.filters.every((f) => /^(FlateDecode|Fl|ASCII85Decode|A85)$/.test(f))) {
+          const raw = data, nc = im.cs === "DeviceRGB" ? 3 : 1;
+          if (raw.length < im.w * im.h * nc) continue;
+          const c = document.createElement("canvas"); c.width = im.w; c.height = im.h;
+          const g = c.getContext("2d"), out = g.createImageData(im.w, im.h);
+          for (let i = 0; i < im.w * im.h; i++) {
+            const p = i * 4;
+            if (nc === 3) { out.data[p] = raw[i * 3]; out.data[p + 1] = raw[i * 3 + 1]; out.data[p + 2] = raw[i * 3 + 2]; }
+            else out.data[p] = out.data[p + 1] = out.data[p + 2] = raw[i];
+            out.data[p + 3] = 255;
+          }
+          g.putImageData(out, 0, 0);
+          return await createImageBitmap(c);
+        }
+      } catch (e) { console.warn("pdf image decode failed", e); }
+    }
+    return null;
+  }
+  // one page → ImageBitmap (vector first, then scanned-picture fallback)
+  async function pdfPageBitmap(pdf, idx, maxPx) {
+    const pn = pdf.pages[idx];
+    let kind = "vector", cv = null;
+    try { cv = await renderVectorPage(pdf, pn, maxPx || 3200); } catch (e) { console.warn("vector render failed", e); }
+    if (cv) return { bitmap: await createImageBitmap(cv), kind };
+    const bmp = await rasterFromPage(pdf, pn).catch(() => null);
+    if (bmp) return { bitmap: bmp, kind: "scan" };
+    return null;
+  }
+
+  // ---------- PDF page picker (thumbnails) ----------
+  let pgPickToken = 0;
+  function pickPdfPage(pdf, name, current) {
+    return new Promise((resolve) => {
+      const modal = $("#pgModal"), grid = $("#pgGrid");
+      const token = ++pgPickToken;
+      grid.innerHTML = "";
+      $("#pgTitle").textContent = name || "PDF";
+      $("#pgSub").textContent = `${pdf.pages.length} pages — tap the floor plan page`;
+      modal.hidden = false;
+      const done = (v) => { if (token !== pgPickToken) return; pgPickToken++; modal.hidden = true; resolve(v); };
+      $("#pgClose").onclick = () => done(null);
+      const cards = [];
+      pdf.pages.forEach((pn, i) => {
+        const card = document.createElement("button");
+        card.type = "button"; card.className = "pgcard" + (i === current ? " cur" : "");
+        card.innerHTML = `<span class="pgph">…</span><span class="pgn">${i + 1}</span>`;
+        card.addEventListener("click", () => done(i));
+        grid.appendChild(card); cards.push(card);
+      });
+      (async () => {
+        for (let i = 0; i < pdf.pages.length; i++) {
+          if (token !== pgPickToken) return;
+          const card = cards[i];
+          try {
+            const cv = await renderVectorPage(pdf, pdf.pages[i], 300);
+            if (token !== pgPickToken) return;
+            if (cv) { card.querySelector(".pgph").replaceWith(cv); }
+            else card.querySelector(".pgph").textContent = "no vector preview";
+          } catch (e) { card.querySelector(".pgph").textContent = "—"; }
+          $("#pgSub").textContent = `${pdf.pages.length} pages — tap the floor plan page` + (i + 1 < pdf.pages.length ? `  ·  previews ${i + 1}/${pdf.pages.length}` : "");
+          await new Promise((r) => setTimeout(r, 0));
+        }
+      })();
+    });
   }
 
   // ---------- persistence (full session incl. image, in IndexedDB) ----------
@@ -3331,6 +3536,7 @@
       syncEnhInputs(); applyEnhance();
       recomputeScale(); fit(); renderPanel(); updateHud();
       setMode(state.mmPerPx ? "edit" : "calibrate");
+      curPdf = null; pdfPagerUI();
       toast("Restored your last session — “Remove” to start over");
     } catch (e) { console.warn("restore failed", e); }
   }
@@ -3709,7 +3915,7 @@
   })();
 
   if (location.hostname === "localhost" || location.protocol === "file:") {
-    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize };
+    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize, loadFile, openPdf, pdfPageBitmap, renderVectorPage, gotoPdfPage };
   }
 })();
 </script>
