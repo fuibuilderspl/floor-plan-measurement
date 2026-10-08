@@ -803,6 +803,7 @@
     snapKind: null,      // "corner" | "edge"
     guides: [],          // [{axis:'x'|'y', at}] alignment guides
     pdfPage: 0,          // index of the page shown from the open PDF
+    pdfTexts: null,      // [{s,fx,fy,fh}] text runs read from the vector PDF page (fractions of the image)
     loupe: true,         // magnifier while placing points
     srcBlob: null,       // PNG blob of the loaded image (for session restore)
     rate: 0,             // currency per area unit (matches state.units)
@@ -2192,8 +2193,49 @@
     g.filter = "none";
     return { canvas: c, w, h, sc };
   }
+  // ---------- dimensions straight from the PDF's own text (exact — no OCR) ----------
+  function parseDimText(raw) {
+    let t = raw.replace(/[±+~≈]/g, "").replace(/\s+/g, "");
+    if (/^\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:mm|cm|m)?$/i.test(t)) t = t.replace(/,/g, "");
+    else if (/^\d+,\d{1,2}(?:mm|cm|m)?$/i.test(t)) t = t.replace(",", ".");
+    const m = /^(\d+(?:\.\d+)?)(mm|cm|m)?$/i.exec(t);
+    if (!m) return null;
+    const v = parseFloat(m[1]), u = (m[2] || "").toLowerCase();
+    let mm, unit;
+    if (u === "mm") { mm = v; unit = "mm"; }
+    else if (u === "cm") { mm = v * 10; unit = "cm"; }
+    else if (u === "m") { mm = v * 1000; unit = "m"; }
+    else if (m[1].indexOf(".") >= 0 && v < 100) { mm = v * 1000; unit = "m"; }   // 2.40 → metres
+    else if (m[1].indexOf(".") < 0 && v >= 200) { mm = v; unit = "mm"; }          // 3040 → mm
+    else return null;
+    if (mm < 200 || mm > 99000) return null;
+    return { val: v, unit, mm };
+  }
+  function scanFromPdfText() {
+    const note = $("#scanNote");
+    note.style.display = "block";
+    const cands = [];
+    for (const t of state.pdfTexts) {
+      const d = parseDimText(t.s);
+      if (!d) continue;
+      cands.push({ text: t.s.replace(/\s+/g, ""), val: d.val, unit: d.unit, cx: t.fx * state.iw, cy: t.fy * state.ih, conf: 100, src: "pdf" });
+    }
+    const kept = [];
+    for (const c of cands) {
+      if (kept.some((k) => k.text === c.text && Math.hypot(k.cx - c.cx, k.cy - c.cy) < 25)) continue;
+      kept.push(c);
+    }
+    kept.sort((p, q) => p.cy - q.cy || p.cx - q.cx);
+    state.scanCands = kept;
+    note.textContent = kept.length
+      ? `Found ${kept.length} printed dimension${kept.length > 1 ? "s" : ""} — read straight from the PDF text, so the numbers are exact. Tap one → it jumps you to that spot with the number filled in; draw the line between its two ends and Apply.`
+      : "This PDF page has text but no dimension numbers — draw the reference line manually.";
+    renderScanList(); render();
+    if (kept.length && isAppUI()) $(".panel").classList.add("sheetopen");
+  }
   async function scanDimensions() {
     if (!state.src) return;
+    if (state.pdfTexts && state.pdfTexts.length) { scanFromPdfText(); return; }
     const btn = $("#scanDims"), note = $("#scanNote");
     btn.disabled = true; note.style.display = "block"; note.textContent = "loading OCR…";
     const T = await loadOcr();
@@ -2248,7 +2290,7 @@
       const d = document.createElement("div");
       d.className = "ref";
       d.innerHTML = `<span>${c.text}<small style="color:var(--faint)"> ${c.unit}</small></span>`
-        + `<span style="font-size:10.5px;color:var(--faint)">conf ${c.conf}</span>`
+        + `<span style="font-size:10.5px;color:var(--faint)">${c.src === "pdf" ? "from PDF" : "conf " + c.conf}</span>`
         + `<button class="btn sm" data-i="${i}">Go</button>`;
       d.querySelector("button").addEventListener("click", () => useScanCand(i));
       list.appendChild(d);
@@ -2977,6 +3019,7 @@
 
   // a PDF kept open after loading so the user can flip to another page without re-opening the file
   let curPdf = null;
+  const PDF_PX = 4200; // PDF pages are drawn this big so small dimension text stays crisp when zoomed
 
   function pdfPagerUI() {
     const n = curPdf ? curPdf.pages.length : 0;
@@ -2993,7 +3036,7 @@
     const name = nameOverride || file.name || "image";
     $("#pdfNote").style.display = "none";
     try {
-      let bmp, title = name, pdfNote = null;
+      let bmp, title = name, pdfNote = null, pageTexts = null;
       if (/pdf$/i.test(file.type) || /\.pdf$/i.test(name)) {
         toast("Reading PDF…");
         const abuf = await file.arrayBuffer();
@@ -3018,7 +3061,7 @@
           curPdf = pdf; state.pdfPage = idx; pdfPagerUI();
           return;
         }
-        bmp = res.bitmap;
+        bmp = res.bitmap; pageTexts = res.texts || null;
         curPdf = pdf; state.pdfPage = idx;
         if (pdf.pages.length > 1) title = `${name} · p.${idx + 1}`;
         pdfNote = res.kind === "scan"
@@ -3028,7 +3071,8 @@
         curPdf = null;
         bmp = await createImageBitmap(file);
       }
-      await adoptBitmap(bmp, title);
+      await adoptBitmap(bmp, title, curPdf ? PDF_PX : 3400);
+      state.pdfTexts = pageTexts;
       if (pdfNote) { $("#pdfNote").style.display = "block"; $("#pdfNote").textContent = pdfNote; }
       pdfPagerUI();
     } catch (err) {
@@ -3049,7 +3093,8 @@
       if (!res) { toast("Couldn't draw page " + (idx + 1)); return; }
       state.pdfPage = idx; pdfPagerUI();
       const base = (state.fileName || "PDF").replace(/ · p\.\d+$/, "");
-      await adoptBitmap(res.bitmap, `${base} · p.${idx + 1}`);
+      await adoptBitmap(res.bitmap, `${base} · p.${idx + 1}`, PDF_PX);
+      state.pdfTexts = res.texts || null;
       $("#pdfNote").style.display = "block";
       $("#pdfNote").textContent = res.kind === "scan" ? "Scanned PDF — using the page's picture." : "✓ Drawn from the vector PDF. If any lines look missing, export the page as an image from your PDF viewer instead.";
     } finally { pdfBusy = false; pdfPagerUI(); }
@@ -3063,8 +3108,9 @@
   });
 
   // make a bitmap the current plan (shared by images, PDFs and PDF page switches)
-  async function adoptBitmap(bmp, name) {
-    bmp = await downscale(bmp, 3400);
+  async function adoptBitmap(bmp, name, maxDim) {
+    bmp = await downscale(bmp, maxDim || 3400);
+    state.pdfTexts = null;
     state.src = bmp;
     state.iw = bmp.width; state.ih = bmp.height;
     state.enhanced = null;
@@ -3101,7 +3147,7 @@
     $("#empty").classList.remove("hide");
     $("#fileInfo").textContent = "No file loaded.";
     $("#pdfNote").style.display = "none";
-    curPdf = null; state.pdfPage = 0; pdfPagerUI();
+    curPdf = null; state.pdfPage = 0; state.pdfTexts = null; pdfPagerUI();
     IDB.del("session");
     renderPanel(); render(); setMode("pan");
   });
@@ -3145,7 +3191,20 @@
         let d = 1, j = i + 1; const buf = [];
         while (j < n && d > 0) {
           const c = str[j];
-          if (c === "\\") { buf.push(str[j + 1]); j += 2; continue; }
+          if (c === "\\") {
+            const e = str[j + 1];
+            if (e >= "0" && e <= "7") { // octal \ddd
+              let k = j + 1, v = 0, cnt = 0;
+              while (k < n && cnt < 3 && str[k] >= "0" && str[k] <= "7") { v = v * 8 + (str.charCodeAt(k) - 48); k++; cnt++; }
+              buf.push(String.fromCharCode(v & 255)); j = k; continue;
+            }
+            const esc = { n: 10, r: 13, t: 9, b: 8, f: 12 };
+            if (e in esc) buf.push(String.fromCharCode(esc[e]));
+            else if (e === "\r") { if (str[j + 2] === "\n") j++; } // line continuation
+            else if (e === "\n") { /* line continuation */ }
+            else buf.push(e);
+            j += 2; continue;
+          }
           if (c === "(") d++; else if (c === ")") { d--; if (!d) break; }
           buf.push(c); j++;
         }
@@ -3156,7 +3215,12 @@
         while (j < n && d > 0) { if (str[j] === "<" && str[j + 1] === "<") { d++; j += 2; } else if (str[j] === ">" && str[j + 1] === ">") { d--; j += 2; } else j++; }
         toks.push({ t: "dict" }); i = j; continue;
       }
-      if (ch === "<") { const j = str.indexOf(">", i); toks.push({ t: "s", v: "" }); i = (j < 0 ? n : j + 1); continue; }
+      if (ch === "<") { // hex string → bytes (Type0 / CID fonts use these for text)
+        const j = str.indexOf(">", i);
+        const hex = str.slice(i + 1, j < 0 ? n : j).replace(/[^0-9a-fA-F]/g, "");
+        let v = ""; for (let k = 0; k < hex.length; k += 2) v += String.fromCharCode(parseInt(hex.substr(k, 2).padEnd(2, "0"), 16));
+        toks.push({ t: "s", v }); i = (j < 0 ? n : j + 1); continue;
+      }
       if (ch === "[") { toks.push({ t: "o", v: "[" }); i++; continue; }
       if (ch === "]") { toks.push({ t: "o", v: "]" }); i++; continue; }
       if (ch === "/") { let j = i + 1; while (j < n && delim.indexOf(str[j]) < 0) j++; toks.push({ t: "n", v: str.slice(i + 1, j) }); i = j; continue; }
@@ -3274,8 +3338,119 @@
     return pm ? pdfInherit(pdf, +pm[1], re, d + 1) : null;
   }
 
+  // ---------- PDF text: fonts, encodings, glyph widths ----------
+  const CP1252 = { 128: "€", 130: "‚", 131: "ƒ", 132: "„", 133: "…", 134: "†", 135: "‡", 136: "ˆ", 137: "‰", 138: "Š", 139: "‹", 140: "Œ", 142: "Ž", 145: "‘", 146: "’", 147: "“", 148: "”", 149: "•", 150: "–", 151: "—", 152: "˜", 153: "™", 154: "š", 155: "›", 156: "œ", 158: "ž", 159: "Ÿ" };
+  const GLYPHS = { space: " ", exclam: "!", quotedbl: '"', numbersign: "#", dollar: "$", percent: "%", ampersand: "&", quotesingle: "'", parenleft: "(", parenright: ")", asterisk: "*", plus: "+", comma: ",", hyphen: "-", minus: "−", period: ".", slash: "/", zero: "0", one: "1", two: "2", three: "3", four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9", colon: ":", semicolon: ";", less: "<", equal: "=", greater: ">", question: "?", at: "@", bracketleft: "[", backslash: "\\", bracketright: "]", underscore: "_", degree: "°", plusminus: "±", multiply: "×", bullet: "•", endash: "–", emdash: "—", mu: "µ", micro: "µ", registered: "®", copyright: "©", onehalf: "½", onequarter: "¼" };
+  function glyphNameToUni(n) {
+    if (GLYPHS[n]) return GLYPHS[n];
+    if (/^uni[0-9A-Fa-f]{4}$/.test(n)) return String.fromCharCode(parseInt(n.slice(3), 16));
+    return n.length === 1 ? n : null;
+  }
+
+  // ToUnicode CMap → Map(charCode → string)
+  function parseToUnicode(txt) {
+    const map = new Map();
+    const u16 = (h) => {
+      if (h.length <= 2) return String.fromCharCode(parseInt(h, 16));
+      let o = ""; for (let i = 0; i < h.length; i += 4) o += String.fromCharCode(parseInt(h.substr(i, 4), 16));
+      return o;
+    };
+    for (const blk of txt.matchAll(/beginbfchar([\s\S]*?)endbfchar/g))
+      for (const m of blk[1].matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g)) map.set(parseInt(m[1], 16), u16(m[2]));
+    for (const blk of txt.matchAll(/beginbfrange([\s\S]*?)endbfrange/g))
+      for (const m of blk[1].matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>\s*(?:<([0-9a-fA-F]+)>|\[([^\]]*)\])/g)) {
+        const lo = parseInt(m[1], 16), hi = Math.min(parseInt(m[2], 16), lo + 65535);
+        if (m[3] != null) {
+          const b = u16(m[3]), last = b.charCodeAt(b.length - 1);
+          for (let c = lo; c <= hi; c++) map.set(c, b.slice(0, -1) + String.fromCharCode(last + (c - lo)));
+        } else {
+          let k = 0;
+          for (const d of m[4].matchAll(/<([0-9a-fA-F]+)>/g)) { if (lo + k > hi) break; map.set(lo + k, u16(d[1])); k++; }
+        }
+      }
+    return map;
+  }
+  // CID /W array:  c [w w …]  or  c1 c2 w
+  function parseWArray(text) {
+    const w = new Map(), tk = text.match(/\[|\]|-?\d+(?:\.\d+)?/g) || [];
+    let i = tk[0] === "[" ? 1 : 0;
+    while (i < tk.length) {
+      if (tk[i] === "]") { i++; continue; }
+      const c = +tk[i++];
+      if (tk[i] === "[") { i++; let k = 0; while (i < tk.length && tk[i] !== "]") w.set(c + k++, +tk[i++]); i++; }
+      else { const c2 = +tk[i++], ww = +tk[i++]; for (let k = c; k <= Math.min(c2, c + 65535); k++) w.set(k, ww); }
+    }
+    return w;
+  }
+  // text of an array value that is either inline "[…]" or an indirect reference to an array object
+  function grabArray(pdf, body, key) {
+    const m = new RegExp("/" + key + "\\s*(?:(\\d+)\\s+\\d+\\s+R|(\\[))").exec(body);
+    if (!m) return null;
+    if (m[1]) { const o = pdf.objs[+m[1]]; return o ? o.body : null; }
+    const i = m.index + m[0].length - 1;
+    let d = 0, j = i;
+    for (; j < body.length; j++) { if (body[j] === "[") d++; else if (body[j] === "]") { d--; if (!d) break; } }
+    return body.slice(i, j + 1);
+  }
+  function fontCss(base) {
+    const b = (base || "").replace(/^[A-Z]{6}\+/, "").toLowerCase();
+    const bold = /bold|black|heavy/.test(b), ital = /italic|oblique/.test(b);
+    let fam = "Arial, Helvetica, sans-serif";
+    if (/narrow|condensed/.test(b)) fam = '"Arial Narrow", "Liberation Sans Narrow", Arial, Helvetica, sans-serif';
+    else if (/times|georgia|garamond|palatino|serif/.test(b) && !/sans/.test(b)) fam = '"Times New Roman", Times, serif';
+    else if (/courier|mono|consolas/.test(b)) fam = '"Courier New", Courier, monospace';
+    return (ital ? "italic " : "") + (bold ? "bold " : "") + "100px " + fam;
+  }
+  async function parsePdfFont(pdf, n) {
+    const fb = pdf.objs[n].body;
+    const sub = ((/\/Subtype\s*\/(\w+)/.exec(fb)) || [])[1] || "";
+    const bm = /\/BaseFont\s*\/([^\s/<>\[\]()]+)/.exec(fb);
+    const f = { cid: sub === "Type0", uni: new Map(), widths: new Map(), dw: 1000, css: fontCss(bm ? bm[1] : ""), diff: null };
+    const tu = /\/ToUnicode\s+(\d+)\s+\d+\s+R/.exec(fb);
+    if (tu) { const st = await pdf.stream(+tu[1]); if (st) f.uni = parseToUnicode(bytesToLatin(st)); }
+    if (f.cid) {
+      const dm = /\/DescendantFonts\s*\[\s*(\d+)\s+\d+\s+R/.exec(fb);
+      const db = dm && pdf.objs[+dm[1]] ? pdf.objs[+dm[1]].body : fb;
+      const dw = /\/DW\s+(-?\d+)/.exec(db); if (dw) f.dw = +dw[1];
+      const wt = grabArray(pdf, db, "W"); if (wt) f.widths = parseWArray(wt);
+    } else {
+      const fc = /\/FirstChar\s+(\d+)/.exec(fb), first = fc ? +fc[1] : 0;
+      const wt = grabArray(pdf, fb, "Widths");
+      if (wt) (wt.match(/-?\d+(?:\.\d+)?/g) || []).forEach((v, i) => f.widths.set(first + i, +v));
+      f.dw = null; // unlisted code → use the fallback font's natural width
+      const df = /\/Differences\s*\[([^\]]*)\]/.exec(fb);
+      if (df) {
+        f.diff = new Map(); let c = 0;
+        for (const t of df[1].matchAll(/(\d+)|\/([^\s/]+)/g)) { if (t[1] != null) c = +t[1]; else { const u = glyphNameToUni(t[2]); if (u) f.diff.set(c, u); c++; } }
+      }
+    }
+    return f;
+  }
+  // name → parsed font, for the fonts a page can use
+  async function loadPdfFonts(pdf, pageNum) {
+    pdf.fontCache = pdf.fontCache || {};
+    const objs = pdf.objs, bodies = [objs[pageNum].body];
+    const rr = pdfInherit(pdf, pageNum, /\/Resources\s+(\d+)\s+\d+\s+R/);
+    if (rr && objs[+rr[1]]) bodies.push(objs[+rr[1]].body);
+    let dict = null;
+    for (const b of bodies) {
+      const im = /\/Font\s*<<((?:[^<>]|<<[^<>]*>>)*)>>/.exec(b);
+      if (im) { dict = im[1]; break; }
+      const rm = /\/Font\s+(\d+)\s+\d+\s+R/.exec(b);
+      if (rm && objs[+rm[1]]) { dict = objs[+rm[1]].body; break; }
+    }
+    const out = {};
+    if (!dict) return out;
+    for (const m of dict.matchAll(/\/([^\s/<>\[\]()]+)\s+(\d+)\s+\d+\s+R/g)) {
+      const n = +m[2];
+      if (!(n in pdf.fontCache)) pdf.fontCache[n] = await parsePdfFont(pdf, n).catch(() => null);
+      out[m[1]] = pdf.fontCache[n];
+    }
+    return out;
+  }
+
   // draw one page's vector content. maxPx = longest side of the result.
-  async function renderVectorPage(pdf, pageNum, maxPx) {
+  async function renderVectorPage(pdf, pageNum, maxPx, opts) {
     const objs = pdf.objs;
     const pb = objs[pageNum].body;
     const mm = pdfInherit(pdf, pageNum, /\/MediaBox\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)/);
@@ -3316,6 +3491,76 @@
     g.beginPath();
 
     const toks = tokenizePdf(content);
+    // ---- text state ----
+    const fonts = (opts && opts.text === false) ? null : await loadPdfFonts(pdf, pageNum).catch(() => ({}));
+    let Tm = [1, 0, 0, 1, 0, 0], Tlm = [1, 0, 0, 1, 0, 0], Tc = 0, Tw = 0, Th = 1, TLd = 0, Trise = 0, Tmode = 0, curFont = null, fsz = 0;
+    const mul = (A, B) => [A[0] * B[0] + A[1] * B[2], A[0] * B[1] + A[1] * B[3], A[2] * B[0] + A[3] * B[2], A[2] * B[1] + A[3] * B[3], A[4] * B[0] + A[5] * B[2] + B[4], A[4] * B[1] + A[5] * B[3] + B[5]];
+    const measCache = new Map();
+    const texts = []; // every text run: {s, x1,y1,x2,y2 (baseline ends, device px), ox,oy (to the visual centre), h}
+    function natW(font, ch) { // natural advance of ch in the fallback font, in em
+      const key = font.css + "|" + ch;
+      let v = measCache.get(key);
+      if (v == null) { g.save(); g.font = font.css; v = g.measureText(ch).width / 100; g.restore(); measCache.set(key, v); }
+      return v;
+    }
+    function moveText(tx, ty) { Tlm = mul([1, 0, 0, 1, tx, ty], Tlm); Tm = Tlm.slice(); }
+    function showText(items) {
+      if (!fonts || !curFont || !fsz) return;
+      const f = curFont, base = g.getTransform(), k = fsz / 100, step = f.cid ? 2 : 1;
+      const T0 = Tm.slice();
+      let tx = 0, str = "";
+      g.font = f.css; g.textAlign = "left"; g.textBaseline = "alphabetic";
+      for (const it of items) {
+        if (typeof it === "number") { tx -= it / 1000 * fsz * Th; continue; }
+        if (typeof it !== "string") continue;
+        for (let p = 0; p + step <= it.length; p += step) {
+          const code = step === 2 ? (it.charCodeAt(p) << 8) | it.charCodeAt(p + 1) : it.charCodeAt(p);
+          let u = f.uni.get(code);
+          if (u == null && !f.cid) u = (f.diff && f.diff.get(code)) || CP1252[code] || String.fromCharCode(code);
+          let w = f.widths.get(code); if (w == null) w = f.dw;
+          let wEm = w != null ? w / 1000 : null;
+          if (wEm == null) wEm = u ? natW(f, u[0]) : 0.5;
+          if (u) str += u;
+          if (Tmode !== 3 && u && u.trim() !== "") {
+            let sx = 1;
+            if (w != null) { const nat = natW(f, u); if (nat > 0) sx = clamp(wEm / nat, 0.35, 3); }
+            g.setTransform(base);
+            g.transform(Tm[0], Tm[1], Tm[2], Tm[3], Tm[4], Tm[5]);
+            g.translate(tx, Trise);
+            g.scale(k * Th * sx, -k);
+            g.fillText(u, 0, 0);
+          }
+          tx += (wEm * fsz + Tc + (!f.cid && code === 32 ? Tw : 0)) * Th;
+        }
+      }
+      g.setTransform(base);
+      if (str.trim() && Tmode !== 3) {
+        const M = base.multiply(new DOMMatrix(T0));
+        const o = M.transformPoint({ x: 0, y: 0 }), e = M.transformPoint({ x: tx, y: 0 }), up = M.transformPoint({ x: 0, y: fsz * 0.35 });
+        texts.push({ s: str, x1: o.x, y1: o.y, x2: e.x, y2: e.y, ox: up.x - o.x, oy: up.y - o.y, h: Math.hypot(M.c, M.d) * Math.abs(fsz) });
+      }
+      Tm = mul([1, 0, 0, 1, tx, 0], Tm);
+    }
+    // glue neighbouring runs on the same baseline into one string ("±" + "3040" → "±3040")
+    function mergedTexts() {
+      const out = [];
+      for (const t of texts) {
+        const p = out[out.length - 1];
+        if (p) {
+          const dx = p.x2 - p.x1, dy = p.y2 - p.y1, L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L;
+          const qx = t.x1 - p.x2, qy = t.y1 - p.y2;
+          const along = qx * ux + qy * uy, perp = Math.abs(-qx * uy + qy * ux);
+          const tl = Math.hypot(t.x2 - t.x1, t.y2 - t.y1) || 1;
+          const par = Math.abs(ux * (t.x2 - t.x1) / tl + uy * (t.y2 - t.y1) / tl);
+          if (L > 0.5 && par > 0.98 && perp < p.h * 0.25 && along > -p.h * 0.2 && along < p.h * 0.9) {
+            p.s += (along > p.h * 0.3 ? " " : "") + t.s; p.x2 = t.x2; p.y2 = t.y2; continue;
+          }
+        }
+        out.push(Object.assign({}, t));
+      }
+      return out;
+    }
+
     const vals = [];
     const minLw = 0.35 / s;
     let clipPending = null, inText = false, drew = 0;
@@ -3341,7 +3586,6 @@
       const o = tk.v;
       if (o === "[") { const arr = []; i++; while (i < toks.length && !(toks[i].t === "o" && toks[i].v === "]")) { arr.push(toks[i].v); i++; } vals.push(arr); continue; }
       if (o === "]") continue;
-      if (inText) { if (o === "ET") inText = false; vals.length = 0; continue; }
       switch (o) {
         case "q": g.save(); break;
         case "Q": try { g.restore(); } catch (e) {} break;
@@ -3369,12 +3613,35 @@
           endPath(o); break;
         case "W": clipPending = "nz"; break;
         case "W*": clipPending = "*"; break;
-        case "BT": inText = true; break;
+        case "BT": Tm = [1, 0, 0, 1, 0, 0]; Tlm = [1, 0, 0, 1, 0, 0]; break;
+        case "ET": break;
+        case "Tf": if (vals.length >= 2) { curFont = fonts ? (fonts[vals[vals.length - 2]] || null) : null; fsz = +num(1) || 0; } break;
+        case "Tc": if (vals.length) Tc = +num(1) || 0; break;
+        case "Tw": if (vals.length) Tw = +num(1) || 0; break;
+        case "Tz": if (vals.length) Th = (+num(1) || 100) / 100; break;
+        case "TL": if (vals.length) TLd = +num(1) || 0; break;
+        case "Ts": if (vals.length) Trise = +num(1) || 0; break;
+        case "Tr": if (vals.length) Tmode = +num(1) || 0; break;
+        case "Td": if (vals.length >= 2) moveText(num(2), num(1)); break;
+        case "TD": if (vals.length >= 2) { TLd = -num(1); moveText(num(2), num(1)); } break;
+        case "Tm": if (vals.length >= 6) { Tm = [num(6), num(5), num(4), num(3), num(2), num(1)]; Tlm = Tm.slice(); } break;
+        case "T*": moveText(0, -TLd); break;
+        case "Tj": if (typeof vals[vals.length - 1] === "string") showText([vals[vals.length - 1]]); break;
+        case "TJ": if (Array.isArray(vals[vals.length - 1])) showText(vals[vals.length - 1]); break;
+        case "'": moveText(0, -TLd); if (typeof vals[vals.length - 1] === "string") showText([vals[vals.length - 1]]); break;
+        case '"': if (vals.length >= 3) { Tw = num(3); Tc = num(2); } moveText(0, -TLd); if (typeof vals[vals.length - 1] === "string") showText([vals[vals.length - 1]]); break;
         default: break;
       }
       vals.length = 0;
     }
     if (drew < 3) return null;
+    if (fonts) {
+      c.pdfTexts = mergedTexts().map((t) => ({
+        s: t.s.trim(),
+        fx: ((t.x1 + t.x2) / 2 + t.ox) / c.width, fy: ((t.y1 + t.y2) / 2 + t.oy) / c.height,
+        fh: t.h / c.width,
+      })).filter((t) => t.s);
+    }
     return c;
   }
 
@@ -3431,8 +3698,8 @@
   async function pdfPageBitmap(pdf, idx, maxPx) {
     const pn = pdf.pages[idx];
     let kind = "vector", cv = null;
-    try { cv = await renderVectorPage(pdf, pn, maxPx || 3200); } catch (e) { console.warn("vector render failed", e); }
-    if (cv) return { bitmap: await createImageBitmap(cv), kind };
+    try { cv = await renderVectorPage(pdf, pn, maxPx || PDF_PX); } catch (e) { console.warn("vector render failed", e); }
+    if (cv) return { bitmap: await createImageBitmap(cv), kind, texts: cv.pdfTexts || null };
     const bmp = await rasterFromPage(pdf, pn).catch(() => null);
     if (bmp) return { bitmap: bmp, kind: "scan" };
     return null;
@@ -3463,7 +3730,7 @@
           if (token !== pgPickToken) return;
           const card = cards[i];
           try {
-            const cv = await renderVectorPage(pdf, pdf.pages[i], 300);
+            const cv = await renderVectorPage(pdf, pdf.pages[i], 300, { text: false });
             if (token !== pgPickToken) return;
             if (cv) { card.querySelector(".pgph").replaceWith(cv); }
             else card.querySelector(".pgph").textContent = "no vector preview";
@@ -3536,7 +3803,7 @@
       syncEnhInputs(); applyEnhance();
       recomputeScale(); fit(); renderPanel(); updateHud();
       setMode(state.mmPerPx ? "edit" : "calibrate");
-      curPdf = null; pdfPagerUI();
+      curPdf = null; state.pdfTexts = null; pdfPagerUI();
       toast("Restored your last session — “Remove” to start over");
     } catch (e) { console.warn("restore failed", e); }
   }
@@ -3915,7 +4182,7 @@
   })();
 
   if (location.hostname === "localhost" || location.protocol === "file:") {
-    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize, loadFile, openPdf, pdfPageBitmap, renderVectorPage, gotoPdfPage };
+    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize, loadFile, openPdf, pdfPageBitmap, renderVectorPage, gotoPdfPage, loadPdfFonts };
   }
 })();
 </script>
