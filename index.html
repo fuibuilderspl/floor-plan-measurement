@@ -230,9 +230,21 @@
   .slider span:first-child { font-size: 11.5px; color: var(--muted); }
   .slider input[type=range] { width: 100%; accent-color: var(--accent); }
   .slider .v { font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); text-align: right; }
-  input[type=text], input[type=number], select {
+  input[type=text], input[type=number], select, textarea {
     background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px;
     padding: 6px 8px; font-size: 13px; width: 100%;
+  }
+  textarea { font-family: inherit; color: inherit; resize: vertical; line-height: 1.4; }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .docopts { display: flex; flex-direction: column; gap: 6px; }
+  #printRoot { display: none; }
+  @media print {
+    @page { size: A4; margin: 0; }
+    html, body { height: auto !important; overflow: visible !important; background: #fff !important; display: block !important; }
+    body > *:not(#printRoot) { display: none !important; }
+    #printRoot { display: block !important; }
+    #printRoot img.pp { display: block; width: 210mm; height: 297mm; page-break-after: always; break-after: page; }
+    #printRoot img.pp:last-child { page-break-after: auto; break-after: auto; }
   }
   input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .toggle { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-soft); cursor: pointer; }
@@ -688,6 +700,8 @@
           <label class="field" style="width:84px">Margin % <input type="number" id="qMargin" step="any" min="0" value="0" /></label>
           <label class="field" style="width:84px">GST % <input type="number" id="qGst" step="any" min="0" value="9" /></label>
         </div>
+        <label class="field">Letterhead line / 联络 <input type="text" id="qContact" placeholder="phone · email · address (optional)" /></label>
+        <label class="field">Notes / terms / 备注 <textarea id="qNotes" rows="3" placeholder="Printed under the total, e.g. what is included, validity, payment terms"></textarea></label>
         <div class="note">Margin and GST are added on top of the subtotal in the quote total and the report.</div>
       </div>
     </section>
@@ -696,12 +710,21 @@
       <h3>Export <span class="zh">导出</span><span class="chev">▾</span></h3>
       <div class="secbody">
         <div class="row wrap">
+          <button class="btn primary" id="printDoc" type="button">🖨 Print</button>
+          <button class="btn primary" id="savePdf" type="button">⬇ Export PDF</button>
+        </div>
+        <div class="docopts">
+          <label class="toggle"><input type="checkbox" id="optPlan" checked> Include the marked-up plan</label>
+          <label class="toggle"><input type="checkbox" id="optWork" checked> Include measurements &amp; formulas</label>
+          <label class="toggle"><input type="checkbox" id="optMargin"> Show margin as its own line (internal copy)</label>
+        </div>
+        <div class="row wrap">
           <button class="btn" id="copyRep">Copy quote</button>
           <button class="btn" id="saveRep">Save .txt</button>
           <button class="btn" id="saveCsv">Save .csv</button>
           <button class="btn" id="savePng">Save image</button>
         </div>
-        <div class="note">The report is an itemised quote: every space with its formula, linear and count items, subtotals, margin, GST and the total.</div>
+        <div class="note"><b>Print / PDF</b> makes a clean A4 quotation — letterhead, client, scope table, GST and total, then (optional) the marked-up plan and every area's working. By default the margin is built into the rates, so the client sees a clean total; tick the last box for an internal copy that shows it. The text report below is the plain version.</div>
       </div>
     </section>
 
@@ -737,7 +760,7 @@
       <button id="msScan" type="button">🔍&nbsp; Scan for dimensions</button>
       <button id="msOpen" type="button">📂&nbsp; Open another plan</button>
       <button id="msEnhance" type="button">✨&nbsp; Auto-enhance image</button>
-      <button id="msExport" type="button">📤&nbsp; Copy / save quote</button>
+      <button id="msExport" type="button">📤&nbsp; Print / PDF / copy quote</button>
     </div>
   </div>
 </div>
@@ -751,6 +774,7 @@
 </div>
 
 <input type="file" id="file" accept=".jpg,.jpeg,.png,.webp,.pdf,image/*,application/pdf" style="display:none" />
+<div id="printRoot" aria-hidden="true"></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -1229,6 +1253,8 @@
     $("#qClient").value = state.meta.client || "";
     $("#qProject").value = state.meta.project || "";
     $("#qNo").value = state.meta.quoteNo || "";
+    $("#qContact").value = state.meta.contact || "";
+    $("#qNotes").value = state.meta.notes || "";
     $("#qMargin").value = state.meta.margin || 0;
     $("#qGst").value = state.meta.gst != null ? state.meta.gst : 9;
   }
@@ -2899,6 +2925,7 @@
   });
   metaBind("#qClient", "client"); metaBind("#qProject", "project"); metaBind("#qNo", "quoteNo");
   metaBind("#qMargin", "margin", true); metaBind("#qGst", "gst", true);
+  metaBind("#qContact", "contact", false); metaBind("#qNotes", "notes", false);
 
   $("#undoBtn").addEventListener("click", undo);
   $("#redoBtn").addEventListener("click", redo);
@@ -3908,7 +3935,7 @@
     rows.push(["", "QUOTE TOTAL", "", "", "", "", "", "", Math.round(t.quote)]);
     return rows.map((r) => r.join(",")).join("\n");
   }
-  async function renderFullPng() {
+  function renderFullCanvas() {
     const c = document.createElement("canvas");
     c.width = state.iw; c.height = state.ih;
     const g = c.getContext("2d");
@@ -3976,7 +4003,10 @@
         g.fillStyle = getVar("--accent") || "#e0481c"; g.textAlign = "center"; g.fillText(t, mid.x, mid.y + 3);
       });
     }
-    return await new Promise((res) => c.toBlob(res, "image/png"));
+    return c;
+  }
+  async function renderFullPng() {
+    return await new Promise((res) => renderFullCanvas().toBlob(res, "image/png"));
   }
 
   // Save buttons always visible: use the claude 'downloads' capability inside the
@@ -3988,7 +4018,7 @@
   }
   function localDownload(filename, data) {
     try {
-      const mime = /\.png$/.test(filename) ? "image/png" : /\.csv$/.test(filename) ? "text/csv" : "text/plain";
+      const mime = /\.png$/.test(filename) ? "image/png" : /\.pdf$/.test(filename) ? "application/pdf" : /\.csv$/.test(filename) ? "text/csv" : "text/plain";
       const blob = data instanceof Blob ? data : new Blob([data], { type: mime + ";charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -4019,6 +4049,459 @@
   $("#saveRep").addEventListener("click", () => { if (reportReady()) save("takeoff-report.txt", buildReport()); });
   $("#saveCsv").addEventListener("click", () => { if (reportReady()) save("takeoff.csv", buildCsv()); });
   $("#savePng").addEventListener("click", async () => { if (state.src) save("takeoff-annotated.png", await renderFullPng()); });
+
+  // ---------- printable quote (A4): Print + Export PDF ----------
+  // The quote is laid out on canvas pages (so Chinese text, the plan image and the fonts all match the app),
+  // then either sent to the printer as page images or packed into a real PDF with an invisible text layer.
+  const QD = { W: 210, H: 297, K: 9.4488, M: 16 };         // A4 in mm; K = px per mm (240 dpi)
+  const QPT = 25.4 / 72;                                      // mm per point
+  const QF_UI = '"IBM Plex Sans", "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
+  const QF_HEAD = '"Archivo", "IBM Plex Sans", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", Arial, sans-serif';
+  const QF_MONO = '"IBM Plex Mono", ui-monospace, Consolas, "Courier New", "PingFang SC", "Microsoft YaHei", monospace';
+  const QC = { ink: "#1b2429", soft: "#3c474d", muted: "#5d6a70", faint: "#8b969b", line: "#d4d9d1", tint: "#f5f7f3", accent: "#e0481c", teal: "#16788a" };
+
+  class QuoteDoc {
+    constructor(head) { this.head = head; this.pages = []; this.texts = []; this.newPage(true); }
+    get bottom() { return QD.H - QD.M - 6; }
+    font(pt, wt, fam) { return `${wt || 400} ${(pt * QPT * QD.K).toFixed(2)}px ${fam || QF_UI}`; }
+    newPage(first) {
+      const c = document.createElement("canvas");
+      c.width = Math.round(QD.W * QD.K); c.height = Math.round(QD.H * QD.K);
+      const g = c.getContext("2d");
+      g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+      g.textBaseline = "alphabetic";
+      this.pages.push(c); this.texts.push([]); this.cur = this.pages.length - 1; this.g = g; this.y = QD.M;
+      if (!first) this.runHeader();
+    }
+    runHeader() {
+      this.draw("FUI BUILDERS", QD.M, QD.M + 3.2, { pt: 9, wt: 700, fam: QF_HEAD });
+      this.draw(this.head, QD.W - QD.M, QD.M + 3.2, { pt: 8, color: QC.muted, align: "right" });
+      this.hline(QD.M, QD.W - QD.M, QD.M + 5.5, QC.line, 0.25);
+      this.y = QD.M + 11;
+    }
+    ensure(h, redraw) {
+      if (this.y + h <= this.bottom) return false;
+      this.newPage(); if (redraw) redraw();
+      return true;
+    }
+    width(s, font) { this.g.font = font; return this.g.measureText(s).width / QD.K; }
+    // greedy line wrap to maxW mm; keeps hard newlines; CJK may break between any two characters
+    wrap(s, maxW, font) {
+      const g = this.g, out = [];
+      g.font = font;
+      const w = (t) => g.measureText(t).width / QD.K;
+      for (const para of String(s == null ? "" : s).split("\n")) {
+        if (!para.trim()) { out.push(""); continue; }
+        const toks = para.match(/[⺀-鿿＀-￯]|[^\s⺀-鿿＀-￯]+|\s+/g) || [];
+        let line = "";
+        for (const tk of toks) {
+          if (/^\s+$/.test(tk)) { if (line) line += " "; continue; }
+          if (!line && w(tk) > maxW) {          // a single token wider than the column: hard-break it
+            let part = "";
+            for (const ch of tk) { if (part && w(part + ch) > maxW) { out.push(part); part = ""; } part += ch; }
+            line = part;
+          } else if (!line || w(line + tk) <= maxW) line += tk;
+          else { out.push(line.trimEnd()); line = tk; }
+        }
+        if (line) out.push(line.trimEnd());
+      }
+      return out.length ? out : [""];
+    }
+    // draw one line of text; (x, y) = anchor on the baseline, in mm
+    draw(s, x, y, o) {
+      o = o || {};
+      const g = this.g, pt = o.pt || 9, align = o.align || "left";
+      g.font = this.font(pt, o.wt, o.fam);
+      g.fillStyle = o.color || QC.ink; g.textAlign = align;
+      if ("letterSpacing" in g) g.letterSpacing = o.ls ? o.ls + "px" : "0px";
+      g.fillText(s, x * QD.K, y * QD.K);
+      const wmm = g.measureText(s).width / QD.K;
+      this.texts[this.cur].push({ s, x: align === "right" ? x - wmm : align === "center" ? x - wmm / 2 : x, y, pt });
+      return wmm;
+    }
+    rect(x, y, w, h, fill) { this.g.fillStyle = fill; this.g.fillRect(x * QD.K, y * QD.K, w * QD.K, h * QD.K); }
+    hline(x1, x2, y, color, lw) {
+      const g = this.g; g.strokeStyle = color; g.lineWidth = (lw || 0.2) * QD.K;
+      g.beginPath(); g.moveTo(x1 * QD.K, y * QD.K); g.lineTo(x2 * QD.K, y * QD.K); g.stroke();
+    }
+    // baseline offset inside a text line box of height lh
+    base(top, pt, lh) { const em = pt * QPT; return top + (lh - em) / 2 + em * 0.82; }
+    // a paragraph at the cursor, breaking across pages when needed
+    para(s, x, maxW, o) {
+      o = o || {};
+      const pt = o.pt || 9, lh = o.lh || pt * QPT * 1.4;
+      for (const ln of this.wrap(s, maxW, this.font(pt, o.wt, o.fam))) {
+        this.ensure(lh);
+        if (ln) this.draw(ln, x, this.base(this.y, pt, lh), o);
+        this.y += lh;
+      }
+    }
+    // pre-wrapped lines [{s,pt,wt,fam,color,x}] that stay together when they fit on a page
+    block(lines, minKeep) {
+      const lh = (l) => l.lh || (l.pt || 9) * QPT * 1.42;
+      const total = lines.reduce((a, l) => a + lh(l), 0);
+      const room = this.bottom - (QD.M + 11);
+      if (total <= room) this.ensure(total);
+      else this.ensure(lines.slice(0, minKeep || 3).reduce((a, l) => a + lh(l), 0));
+      for (const l of lines) {
+        this.ensure(lh(l));
+        if (l.s) this.draw(l.s, l.x == null ? QD.M : l.x, this.base(this.y, l.pt || 9, lh(l)), l);
+        this.y += lh(l);
+      }
+    }
+    finish() {
+      const n = this.pages.length;
+      this.pages.forEach((c, i) => {
+        this.cur = i; this.g = c.getContext("2d");
+        this.hline(QD.M, QD.W - QD.M, QD.H - QD.M + 1, QC.line, 0.25);
+        this.draw("Fui Builders · measured from the supplied floor plan", QD.M, QD.H - QD.M + 5, { pt: 7.5, color: QC.faint });
+        this.draw(`Page ${i + 1} of ${n}`, QD.W - QD.M, QD.H - QD.M + 5, { pt: 7.5, color: QC.faint, align: "right" });
+      });
+      return this;
+    }
+  }
+
+  const qdMoney = new Intl.NumberFormat("en-SG", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const qdFm = (n) => (n < 0 ? "−" : "") + "$" + qdMoney.format(Math.abs(n));
+  const qdR2 = (x) => Math.round(x * 100) / 100;
+
+  function docReady() {
+    if (!state.spaces.length && !state.lines.length && !state.counts.length) { toast("Nothing to put in the quote yet"); return false; }
+    if ((state.spaces.length || state.lines.length) && !state.mmPerPx) { toast("Scale was removed — set it again"); return false; }
+    return true;
+  }
+  function readDocOpts() {
+    const o = { plan: $("#optPlan").checked, work: $("#optWork").checked, showMargin: $("#optMargin").checked };
+    try { localStorage.setItem("fb_docopts", JSON.stringify(o)); } catch (e) {}
+    return o;
+  }
+  function initDocOpts() {
+    let o = null;
+    try { o = JSON.parse(localStorage.getItem("fb_docopts") || "null"); } catch (e) {}
+    if (o) { $("#optPlan").checked = o.plan !== false; $("#optWork").checked = o.work !== false; $("#optMargin").checked = !!o.showMargin; }
+  }
+
+  // working for one room, as short monospace lines
+  function spaceWorking(sp) {
+    const k = state.mmPerPx, o = sp.pts[0];
+    const V = sp.pts.map((p) => ({ x: (p.x - o.x) * k, y: (p.y - o.y) * k }));
+    let sum = 0; const terms = [];
+    V.forEach((a, i) => {
+      const b = V[(i + 1) % V.length];
+      sum += a.x * b.y - b.x * a.y;
+      terms.push(`(${a.x.toFixed(0)}·${b.y.toFixed(0)} − ${b.x.toFixed(0)}·${a.y.toFixed(0)})`);
+    });
+    const A = Math.abs(sum) / 2, m2 = A / 1e6, ft2 = m2 * M2_TO_FT2;
+    const L = ["Corners (mm, P1 = origin):  " + V.map((p, i) => `P${i + 1}(${p.x.toFixed(0)}, ${p.y.toFixed(0)})`).join("  ")];
+    L.push("Area = 1/2 x | SUM ( x(i)*y(i+1) - x(i+1)*y(i) ) |");
+    if (V.length <= 8) L.push("     = 1/2 x | " + terms.join(" + ") + " |");
+    L.push(`     = 1/2 x | ${sum.toFixed(0)} |  =  ${nf.format(Math.round(A))} mm²`);
+    L.push(`     = ${nf.format(Math.round(A))} ÷ 1,000,000  =  ${m2.toFixed(3)} m²   ×  ${M2_TO_FT2}  =  ${ft2.toFixed(2)} ft²`);
+    return L;
+  }
+
+  async function buildQuoteDoc(opts) {
+    try {
+      await Promise.race([
+        Promise.all(['400 20px "IBM Plex Sans"', '600 20px "IBM Plex Sans"', '700 20px "Archivo"', '600 20px "Archivo"', '400 20px "IBM Plex Mono"'].map((f) => document.fonts.load(f))),
+        new Promise((r) => setTimeout(r, 2500)),
+      ]);
+    } catch (e) {}
+    const meta = state.meta, M = QD.M, CW = QD.W - 2 * M;
+    const u = state.units === "ft" ? "ft" : "m", u2 = u + "²", u2o = state.units === "ft" ? "m²" : "ft²";
+    const mk = opts.showMargin ? 1 : 1 + (meta.margin || 0) / 100;     // client copy: margin folded into the rates
+    const t = totals();
+    const dateStr = new Date().toLocaleDateString("en-SG", { day: "numeric", month: "short", year: "numeric" });
+    const d = new QuoteDoc("Quotation" + (meta.quoteNo ? "  ·  " + meta.quoteNo : "") + (meta.client ? "  ·  " + meta.client : ""));
+
+    // ----- page 1: letterhead -----
+    d.draw("FUI BUILDERS", M, M + 8, { pt: 24, wt: 700, fam: QF_HEAD });
+    d.draw("QUOTATION", QD.W - M, M + 8, { pt: 17, wt: 600, fam: QF_HEAD, color: QC.accent, align: "right" });
+    let hy = M + 13.5;
+    if (meta.contact) { for (const ln of d.wrap(meta.contact, CW * 0.55, d.font(8.5))) { d.draw(ln, M, hy, { pt: 8.5, color: QC.muted }); hy += 4; } }
+    d.draw(meta.quoteNo ? "No. " + meta.quoteNo : "", QD.W - M, M + 13.5, { pt: 9.5, wt: 500, color: QC.soft, align: "right" });
+    d.draw("Date: " + dateStr, QD.W - M, M + 18, { pt: 9.5, color: QC.muted, align: "right" });
+    d.y = Math.max(hy, M + 19) + 2;
+    d.rect(M, d.y, CW, 0.9, QC.accent); d.y += 6;
+
+    // ----- client / project -----
+    const half = (CW - 8) / 2;
+    const cl = d.wrap(meta.client || "—", half, d.font(11, 500)), pj = d.wrap(meta.project || "—", half, d.font(11, 500));
+    d.draw("CLIENT", M, d.y + 2.5, { pt: 7, wt: 600, color: QC.faint, ls: 0.8 });
+    d.draw("PROJECT / SITE", M + half + 8, d.y + 2.5, { pt: 7, wt: 600, color: QC.faint, ls: 0.8 });
+    let cy = d.y + 8;
+    const lhc = 11 * QPT * 1.35, rows = Math.max(cl.length, pj.length);
+    for (let i = 0; i < rows; i++) {
+      if (cl[i]) d.draw(cl[i], M, d.base(cy, 11, lhc), { pt: 11, wt: 500 });
+      if (pj[i]) d.draw(pj[i], M + half + 8, d.base(cy, 11, lhc), { pt: 11, wt: 500 });
+      cy += lhc;
+    }
+    d.y = cy + 3;
+
+    // ----- headline numbers -----
+    const stats = [];
+    if (state.spaces.length) stats.push(["FLOOR AREA", `${(state.units === "ft" ? t.totF : t.totM).toFixed(1)} ${u2}  ·  ${(state.units === "ft" ? t.totM : t.totF).toFixed(1)} ${u2o}`]);
+    if (state.lines.length && state.mmPerPx) stats.push(["LINEAR", `${(state.units === "ft" ? t.linFt : t.linM).toFixed(1)} ${u}`]);
+    if (state.counts.length) stats.push(["ITEMS TO REMOVE", `${t.cntQty} nos`]);
+    if (stats.length) {
+      const sw = (CW - 3 * (stats.length - 1)) / stats.length;
+      d.rect(M, d.y, CW, 14, QC.tint);
+      stats.forEach((st, i) => {
+        const x = M + i * (sw + 3) + 3.5;
+        d.draw(st[0], x, d.y + 4.8, { pt: 6.8, wt: 600, color: QC.faint, ls: 0.8 });
+        d.draw(st[1], x, d.y + 10.6, { pt: 10.5, wt: 600, fam: QF_HEAD });
+      });
+      d.y += 20;
+    }
+
+    // ----- scope of works table -----
+    const sections = [];
+    let sub = 0;
+    if (state.spaces.length) {
+      const rows = []; let st = 0;
+      state.spaces.forEach((sp) => {
+        const m = polyMetrics(sp.pts); if (m.areaFt2 == null) return;
+        const dd = sp.op === "deduct", sg = dd ? -1 : 1, rate = rateOf(sp);
+        const q1 = state.units === "ft" ? m.areaFt2 : m.areaM2, q2 = state.units === "ft" ? m.areaM2 : m.areaFt2;
+        const amt = rate > 0 ? qdR2(sg * rate * q1 * mk) : null;
+        if (amt != null) st += amt;
+        rows.push({ d: (dd ? "(Deduct)  " : "") + sp.name, q: `${dd ? "−" : ""}${q1.toFixed(2)} ${u2}\n(${dd ? "−" : ""}${q2.toFixed(2)} ${u2o})`, r: rate > 0 ? `${qdFm(rate * mk)} / ${u2}` : "—", a: amt });
+      });
+      sections.push({ title: "Floor area works", rows, sub: st }); sub += st;
+    }
+    if (state.lines.length && state.mmPerPx) {
+      const rows = []; let st = 0;
+      state.lines.forEach((it) => {
+        const mm = polyLen(it.pts) * state.mmPerPx, q = state.units === "ft" ? mm / 304.8 : mm / 1000, rate = it.rate || 0;
+        const amt = rate > 0 ? qdR2(rate * q * mk) : null;
+        if (amt != null) st += amt;
+        rows.push({ d: it.name, q: `${q.toFixed(2)} ${u}`, r: rate > 0 ? `${qdFm(rate * mk)} / ${u}` : "—", a: amt });
+      });
+      sections.push({ title: "Linear works (per running " + (u === "ft" ? "foot" : "metre") + ")", rows, sub: st }); sub += st;
+    }
+    if (state.counts.length) {
+      const rows = []; let st = 0;
+      state.counts.forEach((it) => {
+        const q = it.qty != null ? it.qty : it.pts.length, rate = it.rate || 0;
+        const amt = rate > 0 ? qdR2(rate * q * mk) : null;
+        if (amt != null) st += amt;
+        rows.push({ d: it.name, q: `${q} nos`, r: rate > 0 ? `${qdFm(rate * mk)} each` : "—", a: amt });
+      });
+      sections.push({ title: "Items to remove (each)", rows, sub: st }); sub += st;
+    }
+
+    const cols = [
+      { w: 10, a: "left", h: "No." }, { w: CW - 10 - 33 - 29 - 31, a: "left", h: "Description" },
+      { w: 33, a: "right", h: "Quantity" }, { w: 29, a: "right", h: "Rate" }, { w: 31, a: "right", h: "Amount ($)" },
+    ];
+    const colX = []; { let x = M; for (const c of cols) { colX.push(x); x += c.w; } }
+    const cellX = (i) => cols[i].a === "right" ? colX[i] + cols[i].w - 2 : colX[i] + 2;
+    const tHead = () => {
+      d.rect(M, d.y, CW, 7, QC.ink);
+      cols.forEach((c, i) => d.draw(c.h, cellX(i), d.y + 4.7, { pt: 8, wt: 600, color: "#fff", align: c.a }));
+      d.y += 7;
+    };
+    d.draw("SCOPE OF WORKS", M, d.y + 2.5, { pt: 7.5, wt: 600, color: QC.faint, ls: 0.8 }); d.y += 5;
+    tHead();
+    let idx = 0;
+    sections.forEach((sec, si) => {
+      d.ensure(7 + 12, tHead);
+      d.rect(M, d.y, CW, 6.4, QC.tint);
+      d.draw(String.fromCharCode(65 + si) + "   " + sec.title, M + 2, d.y + 4.4, { pt: 8.8, wt: 600, color: QC.teal });
+      d.y += 6.4;
+      sec.rows.forEach((r) => {
+        idx++;
+        const dl = d.wrap(r.d, cols[1].w - 4, d.font(9, 500)), ql = d.wrap(r.q, cols[2].w - 4, d.font(9));
+        const n = Math.max(dl.length, ql.length), lh = 9 * QPT * 1.4, h = n * lh + 2.6;
+        d.ensure(h, tHead);
+        const top = d.y + 1.3;
+        d.draw(String(idx), cellX(0), d.base(top, 9, lh), { pt: 9, color: QC.muted });
+        dl.forEach((ln, i) => d.draw(ln, cellX(1), d.base(top + i * lh, 9, lh), { pt: 9, wt: 500 }));
+        ql.forEach((ln, i) => d.draw(ln, cellX(2), d.base(top + i * lh, 9, lh), { pt: 9, align: "right" }));
+        d.draw(r.r, cellX(3), d.base(top, 9, lh), { pt: 9, color: QC.soft, align: "right" });
+        d.draw(r.a == null ? "—" : qdFm(r.a), cellX(4), d.base(top, 9, lh), { pt: 9, wt: 500, align: "right" });
+        d.y += h;
+        d.hline(M, M + CW, d.y, QC.line, 0.2);
+      });
+      d.ensure(6.5, tHead);
+      d.draw("Subtotal — " + sec.title.replace(/ \(.*\)$/, ""), colX[3] + cols[3].w - 2 - 0, d.y + 4.6, { pt: 8.5, color: QC.muted, align: "right" });
+      d.draw(qdFm(sec.sub), cellX(4), d.y + 4.6, { pt: 9, wt: 600, align: "right" });
+      d.y += 8;
+    });
+
+    // ----- totals -----
+    const marginAmt = opts.showMargin && meta.margin > 0 ? qdR2(sub * meta.margin / 100) : 0;
+    const gstAmt = meta.gst > 0 ? qdR2((sub + marginAmt) * meta.gst / 100) : 0;
+    const total = qdR2(sub + marginAmt + gstAmt);
+    const tw = 84, tx = QD.W - M - tw;
+    d.ensure(34);
+    if (sub > 0) {
+      const line = (label, val, bold) => {
+        d.draw(label, tx + 2, d.y + 4.4, { pt: 9.5, color: bold ? QC.ink : QC.muted, wt: bold ? 600 : 400 });
+        d.draw(val, QD.W - M - 2, d.y + 4.4, { pt: 9.5, wt: bold ? 600 : 500, align: "right" });
+        d.y += 6.4;
+      };
+      line("Subtotal", qdFm(sub));
+      if (marginAmt > 0) line(`Margin ${meta.margin}%`, qdFm(marginAmt));
+      if (gstAmt > 0) line(`GST ${meta.gst}%`, qdFm(gstAmt));
+      d.y += 1;
+      d.rect(tx, d.y, tw, 11, QC.accent);
+      d.draw("TOTAL", tx + 3, d.y + 7.4, { pt: 10, wt: 700, color: "#fff", fam: QF_HEAD, ls: 0.6 });
+      d.draw(qdFm(total), QD.W - M - 3, d.y + 7.6, { pt: 14, wt: 700, color: "#fff", fam: QF_HEAD, align: "right" });
+      d.y += 17;
+    } else {
+      d.para("No rates have been entered — this sheet lists the measured quantities only.", M, CW, { pt: 9, color: QC.muted });
+      d.y += 4;
+    }
+
+    // ----- notes -----
+    if ((meta.notes || "").trim()) {
+      d.ensure(20);
+      d.draw("NOTES / TERMS", M, d.y + 2.5, { pt: 7.5, wt: 600, color: QC.faint, ls: 0.8 }); d.y += 5;
+      d.para(meta.notes.trim(), M, CW, { pt: 9, color: QC.soft });
+    }
+
+    // ----- measured plan -----
+    if (opts.plan && state.src) {
+      d.newPage();
+      d.draw("Measured plan", M, d.y + 6, { pt: 15, wt: 600, fam: QF_HEAD }); d.y += 10;
+      d.para(`${state.fileName || "Floor plan"}   ·   scale: ${fmtScale()}` + (state.refs.length ? `   (from ${state.refs.map((r) => nf.format(Math.round(r.mm)) + " mm ÷ " + dist(r.a, r.b).toFixed(1) + " px").join("  +  ")})` : ""), M, CW, { pt: 8, color: QC.muted });
+      d.y += 2;
+      const img = renderFullCanvas();
+      const maxH = Math.min(d.bottom - d.y - 2, 185);
+      let w = CW, h = w * img.height / img.width;
+      if (h > maxH) { h = maxH; w = h * img.width / img.height; }
+      const x = M + (CW - w) / 2;
+      d.g.imageSmoothingEnabled = true; d.g.imageSmoothingQuality = "high";
+      d.g.drawImage(img, x * QD.K, d.y * QD.K, w * QD.K, h * QD.K);
+      d.g.strokeStyle = QC.line; d.g.lineWidth = 0.25 * QD.K; d.g.strokeRect(x * QD.K, d.y * QD.K, w * QD.K, h * QD.K);
+      d.y += h + 6;
+    }
+
+    // ----- measurements & working -----
+    if (opts.work && state.mmPerPx && (state.spaces.length || state.lines.length)) {
+      if (!(opts.plan && state.src) || d.y > d.bottom - 60) d.newPage();
+      d.draw("Measurements & working", M, d.y + 6, { pt: 15, wt: 600, fam: QF_HEAD }); d.y += 10;
+      d.para("Every area is calculated from the corner points you traced on the plan, converted to millimetres with the scale below, using the shoelace formula.", M, CW, { pt: 8.5, color: QC.muted });
+      d.y += 1.5;
+      d.para(`Scale: ${fmtScale()}` + (state.refs.length ? `   ·   reference${state.refs.length > 1 ? "s" : ""}: ${state.refs.map((r) => nf.format(Math.round(r.mm)) + " mm ÷ " + dist(r.a, r.b).toFixed(1) + " px").join("  +  ")}` : ""), M, CW, { pt: 8, fam: QF_MONO, color: QC.soft });
+      d.y += 3;
+      state.spaces.forEach((sp) => {
+        const m = polyMetrics(sp.pts); if (m.areaFt2 == null) return;
+        const dd = sp.op === "deduct";
+        const lines = [];
+        lines.push({ s: "", lh: 2 });
+        lines.push({ s: sp.name + (dd ? "   [DEDUCT]" : ""), pt: 10.5, wt: 600, fam: QF_HEAD, lh: 6 });
+        const info = `Area ${dd ? "−" : ""}${m.areaFt2.toFixed(2)} ft²  (${dd ? "−" : ""}${m.areaM2.toFixed(2)} m²)   ·   perimeter ${(m.perimMm / 304.8).toFixed(2)} ft  (${(m.perimMm / 1000).toFixed(3)} m)`;
+        d.wrap(info, CW, d.font(8.5, 600)).forEach((s) => lines.push({ s, pt: 8.5, wt: 600, color: QC.teal }));
+        d.wrap("Walls (mm): " + m.edgesMm.map((e) => Math.round(e)).join("  /  "), CW, d.font(8)).forEach((s) => lines.push({ s, pt: 8, color: QC.soft }));
+        spaceWorking(sp).forEach((ln) => d.wrap(ln, CW - 2, d.font(7, 400, QF_MONO)).forEach((s, i) => lines.push({ s, pt: 7, fam: QF_MONO, color: QC.soft, x: M + 1 + (i ? 4 : 0), lh: 3.5 })));
+        d.block(lines, 4);
+        d.hline(M, M + CW, d.y + 1, QC.line, 0.2); d.y += 2;
+      });
+      if (state.lines.length) {
+        const L = [{ s: "", lh: 2 }, { s: "Linear items", pt: 10.5, wt: 600, fam: QF_HEAD, lh: 6 }];
+        state.lines.forEach((it) => {
+          const mm = polyLen(it.pts) * state.mmPerPx;
+          d.wrap(`${it.name}:  ${(mm / 1000).toFixed(2)} m  (${(mm / 304.8).toFixed(2)} ft,  ${nf.format(Math.round(mm))} mm)`, CW, d.font(8.5)).forEach((s) => L.push({ s, pt: 8.5 }));
+        });
+        d.block(L, 3);
+      }
+    }
+    return d.finish();
+  }
+
+  // ---------- PDF writer (page images + invisible text layer so it can be searched / copied) ----------
+  function pdfAscii(s) {
+    const map = { "−": "-", "–": "-", "—": "-", "’": "'", "‘": "'", "“": '"', "”": '"', "≈": "~", "÷": String.fromCharCode(247), "≥": ">", "≤": "<", "→": "->" };
+    let o = "";
+    for (const ch of s) {
+      const c = ch.charCodeAt(0);
+      if (map[ch]) o += map[ch];
+      else if (c >= 32 && c < 256) o += ch;
+      else o += "?";
+    }
+    return o.replace(/[\\()]/g, (m) => "\\" + m);
+  }
+  function pdfHex16(s) { let h = "FEFF"; for (let i = 0; i < s.length; i++) h += s.charCodeAt(i).toString(16).padStart(4, "0"); return "<" + h + ">"; }
+  async function docToPdf(doc, title) {
+    const enc = new TextEncoder();
+    const jpgs = await Promise.all(doc.pages.map((c) => new Promise((res) => c.toBlob((b) => b.arrayBuffer().then((ab) => res(new Uint8Array(ab))), "image/jpeg", 0.9))));
+    const chunks = [], offsets = [];
+    let len = 0;
+    const put = (u8) => { chunks.push(u8); len += u8.length; };
+    const puts = (s) => put(enc.encode(s));
+    const PW = 595.28, PH = 841.89, n = jpgs.length;
+    put(new Uint8Array([37, 80, 68, 70, 45, 49, 46, 52, 10, 37, 226, 227, 207, 211, 10])); // %PDF-1.4 + binary marker
+    const begin = (num) => { offsets[num] = len; puts(num + " 0 obj\n"); };
+    const total = 5 + n * 3;                      // xref size = highest object number + 1
+    begin(1); puts("<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    begin(2); puts("<< /Type /Pages /Count " + n + " /Kids [" + Array.from({ length: n }, (_, i) => (5 + i * 3) + " 0 R").join(" ") + "] >>\nendobj\n");
+    begin(3); puts("<< /Title " + pdfHex16(title) + " /Producer " + pdfHex16("Fui Builders Area Takeoff") + " >>\nendobj\n");
+    begin(4); puts("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n");
+    for (let i = 0; i < n; i++) {
+      const pg = 5 + i * 3, ct = pg + 1, im = pg + 2, c = doc.pages[i];
+      begin(pg);
+      puts(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PW} ${PH}] /Resources << /XObject << /Im0 ${im} 0 R >> /Font << /F1 4 0 R >> /ProcSet [/PDF /Text /ImageC] >> /Contents ${ct} 0 R >>\nendobj\n`);
+      // content: the page picture, then an invisible (render mode 3) text layer
+      let cs = `q ${PW} 0 0 ${PH} 0 0 cm /Im0 Do Q\nBT 3 Tr\n`;
+      for (const t of doc.texts[i]) {
+        if (!t.s.trim()) continue;
+        const x = (t.x * 72 / 25.4).toFixed(2), y = (PH - t.y * 72 / 25.4).toFixed(2);
+        cs += `/F1 ${(t.pt).toFixed(1)} Tf 1 0 0 1 ${x} ${y} Tm (${pdfAscii(t.s)}) Tj\n`;
+      }
+      cs += "ET\n";
+      const csb = enc.encode(cs);
+      begin(ct); puts(`<< /Length ${csb.length} >>\nstream\n`); put(csb); puts("\nendstream\nendobj\n");
+      begin(im); puts(`<< /Type /XObject /Subtype /Image /Width ${c.width} /Height ${c.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpgs[i].length} >>\nstream\n`);
+      put(jpgs[i]); puts("\nendstream\nendobj\n");
+    }
+    const xref = len;
+    puts("xref\n0 " + total + "\n0000000000 65535 f \n");
+    for (let k = 1; k < total; k++) puts(String(offsets[k]).padStart(10, "0") + " 00000 n \n");
+    puts(`trailer\n<< /Size ${total} /Root 1 0 R /Info 3 0 R >>\nstartxref\n${xref}\n%%EOF\n`);
+    return new Blob(chunks, { type: "application/pdf" });
+  }
+
+  function docFileName() {
+    const raw = state.meta.quoteNo || state.meta.client || state.meta.project || "takeoff";
+    const safe = raw.replace(/[^\w一-鿿\- ]+/g, "").trim().replace(/\s+/g, "-").slice(0, 40) || "takeoff";
+    return "Quote-" + safe + "-" + new Date().toISOString().slice(0, 10) + ".pdf";
+  }
+  let docBusy = false;
+  async function runDoc(kind) {
+    if (docBusy || !docReady()) return;
+    docBusy = true;
+    const btns = [$("#printDoc"), $("#savePdf")];
+    btns.forEach((b) => (b.disabled = true));
+    try {
+      toast(kind === "pdf" ? "Preparing the PDF…" : "Preparing to print…");
+      await new Promise((r) => setTimeout(r, 30));
+      const doc = await buildQuoteDoc(readDocOpts());
+      if (kind === "pdf") {
+        const blob = await docToPdf(doc, "Quotation" + (state.meta.quoteNo ? " " + state.meta.quoteNo : "") + (state.meta.client ? " — " + state.meta.client : ""));
+        await save(docFileName(), blob);
+      } else {
+        const root = $("#printRoot");
+        root.innerHTML = "";
+        const imgs = doc.pages.map((c) => { const im = new Image(); im.className = "pp"; im.src = c.toDataURL("image/jpeg", 0.92); root.appendChild(im); return im; });
+        await Promise.all(imgs.map((im) => (im.decode ? im.decode().catch(() => {}) : Promise.resolve())));
+        if (typeof window.claude !== "undefined") toast("If no print window opens, use Export PDF and print the PDF");
+        window.print();
+      }
+    } catch (e) {
+      console.error(e);
+      toast("Couldn't build the document");
+    } finally {
+      docBusy = false;
+      btns.forEach((b) => (b.disabled = false));
+    }
+  }
+  window.addEventListener("afterprint", () => { const r = $("#printRoot"); if (r) r.innerHTML = ""; });
+  $("#printDoc").addEventListener("click", () => runDoc("print"));
+  $("#savePdf").addEventListener("click", () => runDoc("pdf"));
+  ["#optPlan", "#optWork", "#optMargin"].forEach((id) => $(id).addEventListener("change", readDocOpts));
+  initDocOpts();
 
   // ---------- app view (touch-first UI) + install ----------
   const VIEW_KEY = "fb_view";
@@ -4182,7 +4665,7 @@
   })();
 
   if (location.hostname === "localhost" || location.protocol === "file:") {
-    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize, loadFile, openPdf, pdfPageBitmap, renderVectorPage, gotoPdfPage, loadPdfFonts };
+    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize, loadFile, openPdf, pdfPageBitmap, renderVectorPage, gotoPdfPage, loadPdfFonts, buildQuoteDoc, docToPdf, runDoc, renderFullCanvas };
   }
 })();
 </script>
