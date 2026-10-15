@@ -602,6 +602,13 @@
           <button class="btn ghost sm" id="clearImg" disabled>Remove</button>
         </div>
         <div class="note" id="fileInfo">No file loaded.</div>
+        <div class="row wrap" id="rotRow">
+          <span class="note" style="min-width:48px">Rotate</span>
+          <button class="btn sm" id="rotCcw" type="button" title="Rotate 90° anticlockwise">↺ 90°</button>
+          <button class="btn sm" id="rotCw" type="button" title="Rotate 90° clockwise">↻ 90°</button>
+          <button class="btn sm" id="rotFineL" type="button" title="Straighten: 0.5° anticlockwise">−0.5°</button>
+          <button class="btn sm" id="rotFineR" type="button" title="Straighten: 0.5° clockwise">+0.5°</button>
+        </div>
         <div class="pager" id="pdfPager" style="display:none">
           <button class="btn sm" id="pgPrev" type="button" aria-label="Previous page">◀</button>
           <span class="mono" id="pgLbl">Page 1 / 1</span>
@@ -748,6 +755,7 @@
       <button data-mode="measure" type="button">⟺&nbsp; Ruler</button>
       <button data-mode="pan" type="button">✋&nbsp; Pan / move plan</button>
       <button id="msFit" type="button">⤢&nbsp; Fit plan to screen</button>
+      <button id="msRotate" type="button">↻&nbsp; Rotate plan 90°</button>
       <button id="msUnit" type="button">⇄&nbsp; Switch ft² / m²</button>
       <button id="msScan" type="button">🔍&nbsp; Scan for dimensions</button>
       <button id="msOpen" type="button">📂&nbsp; Open another plan</button>
@@ -4127,6 +4135,45 @@
   $("#printDoc").addEventListener("click", () => runPlanExport("print"));
   $("#savePdf").addEventListener("click", () => runPlanExport("pdf"));
 
+  // ---------- rotate the plan (90° steps or a fine straighten) ----------
+  // Everything drawn on the plan (scale refs, rooms, lines, counts, rulers, OCR/PDF dimension spots) is carried along.
+  async function rotatePlan(deg) {
+    if (!state.src) { toast("Open a plan first"); return; }
+    const th = deg * Math.PI / 180, cs = Math.cos(th), sn = Math.sin(th);
+    const ow = state.iw, oh = state.ih;
+    const nw = Math.round(Math.abs(ow * cs) + Math.abs(oh * sn)), nh = Math.round(Math.abs(ow * sn) + Math.abs(oh * cs));
+    const c = document.createElement("canvas"); c.width = nw; c.height = nh;
+    const g = c.getContext("2d");
+    g.fillStyle = "#fff"; g.fillRect(0, 0, nw, nh);
+    g.imageSmoothingQuality = "high";
+    g.translate(nw / 2, nh / 2); g.rotate(th); g.drawImage(state.src, -ow / 2, -oh / 2);
+    const mp = (p) => { // same rotation about the image centre
+      const x = p.x - ow / 2, y = p.y - oh / 2;
+      return { x: x * cs - y * sn + nw / 2, y: x * sn + y * cs + nh / 2 };
+    };
+    state.refs.forEach((r) => { r.a = mp(r.a); r.b = mp(r.b); });
+    state.spaces.forEach((sp) => { sp.pts = sp.pts.map(mp); });
+    state.lines.forEach((it) => { it.pts = it.pts.map(mp); });
+    state.counts.forEach((it) => { it.pts = it.pts.map(mp); });
+    state.measures.forEach((m) => { m.a = mp(m.a); m.b = mp(m.b); });
+    state.scanCands.forEach((cd) => { const q = mp({ x: cd.cx, y: cd.cy }); cd.cx = q.x; cd.cy = q.y; });
+    if (state.pdfTexts) state.pdfTexts.forEach((t) => { const q = mp({ x: t.fx * ow, y: t.fy * oh }); t.fx = q.x / nw; t.fy = q.y / nh; });
+    state.draft = []; state.lineDraft = []; state.countDraft = []; state.rectStart = null; state.measTmp = null; state.calib = null;
+    state.snapPt = null; state.guides = [];
+    closePop();
+    state.src = await createImageBitmap(c);
+    state.iw = nw; state.ih = nh; state.enhanced = null;
+    undoStack = []; redoStack = []; updateUndoUI(); // marks moved with the image, so older snapshots no longer line up
+    try { state.srcBlob = await new Promise((r) => c.toBlob(r, "image/png")); } catch (e) { state.srcBlob = null; }
+    $("#fileInfo").innerHTML = `<b>${escapeHtml(state.fileName)}</b><br>${nw} × ${nh} px on screen`;
+    applyEnhance(); fit(); renderPanel(); render(); updateHud(); persist();
+    toast(Math.abs(deg) >= 45 ? "Rotated " + (deg > 0 ? "clockwise" : "anticlockwise") + " " + Math.abs(deg) + "°" : "Straightened " + deg + "°");
+  }
+  $("#rotCw").addEventListener("click", () => rotatePlan(90));
+  $("#rotCcw").addEventListener("click", () => rotatePlan(-90));
+  $("#rotFineL").addEventListener("click", () => rotatePlan(-0.5));
+  $("#rotFineR").addEventListener("click", () => rotatePlan(0.5));
+
   // ---------- app view (touch-first UI) + install ----------
   const VIEW_KEY = "fb_view";
   function isAppUI() { return document.body.classList.contains("appui"); }
@@ -4235,6 +4282,7 @@
     if (e.target.id === "moreSheet") { $("#moreSheet").hidden = true; return; }
     const b = e.target.closest("button"); if (!b) return;
     if (b.dataset.mode) setMode(b.dataset.mode);
+    else if (b.id === "msRotate") rotatePlan(90);
     else if (b.id === "msFit") { if (state.src) fit(); else toast("Open a plan first"); }
     else if (b.id === "msUnit") setUnits(state.units === "ft" ? "m" : "ft");
     else if (b.id === "msScan") { if (!$("#scanDims").disabled) $("#scanDims").click(); else toast("Open a plan first"); }
@@ -4289,7 +4337,7 @@
   })();
 
   if (location.hostname === "localhost" || location.protocol === "file:") {
-    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize, loadFile, openPdf, pdfPageBitmap, renderVectorPage, gotoPdfPage, loadPdfFonts, renderPlanPage, planToPdf, runPlanExport, renderFullCanvas };
+    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize, loadFile, openPdf, pdfPageBitmap, renderVectorPage, gotoPdfPage, loadPdfFonts, renderPlanPage, planToPdf, runPlanExport, renderFullCanvas, rotatePlan };
   }
 })();
 </script>
