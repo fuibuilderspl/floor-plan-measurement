@@ -3932,18 +3932,28 @@
     rows.push(["", "QUOTE TOTAL", "", "", "", "", "", "", Math.round(t.quote)]);
     return rows.map((r) => r.join(",")).join("\n");
   }
-  function renderFullCanvas() {
+  function renderFullCanvas(compact) {
     const c = document.createElement("canvas");
     c.width = state.iw; c.height = state.ih;
     const g = c.getContext("2d");
     g.drawImage(state.enhanced || state.src, 0, 0);
+    // compact (used for Print / PDF): small numbered badges only, so nothing covers the drawing; figures go in the legend
+    const badge = (p, txt, col) => {
+      const r = Math.max(16, state.iw / 150);
+      g.fillStyle = "#fff"; g.beginPath(); g.arc(p.x, p.y, r + 2, 0, 7); g.fill();
+      g.fillStyle = col; g.beginPath(); g.arc(p.x, p.y, r, 0, 7); g.fill();
+      g.fillStyle = "#fff"; g.textAlign = "center"; g.textBaseline = "middle";
+      g.font = `700 ${r * (txt.length > 1 ? 1.0 : 1.25)}px sans-serif`;
+      g.fillText(txt, p.x, p.y + 1); g.textBaseline = "alphabetic";
+    };
     // overlays in image space
-    state.spaces.forEach((sp) => {
+    state.spaces.forEach((sp, si) => {
       g.beginPath();
       sp.pts.forEach((p, i) => (i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)));
       g.closePath();
-      g.fillStyle = hexA(sp.color, 0.16); g.fill();
+      g.fillStyle = hexA(sp.color, compact ? 0.10 : 0.16); g.fill();
       g.strokeStyle = sp.color; g.lineWidth = Math.max(2, state.iw / 900); g.stroke();
+      if (compact) { badge(centroid(sp.pts), String(si + 1), sp.color); return; }
       const m = polyMetrics(sp.pts);
       const ce = centroid(sp.pts);
       g.font = `600 ${Math.max(13, state.iw / 90)}px sans-serif`;
@@ -3959,20 +3969,21 @@
     if (state.mmPerPx) {
       g.font = `${Math.max(11, state.iw / 110)}px sans-serif`;
       g.lineCap = "round"; g.lineJoin = "round";
-      state.lines.forEach((it) => {
+      state.lines.forEach((it, li) => {
         g.strokeStyle = it.color || "#7a4fbf"; g.lineWidth = Math.max(3, state.iw / 700);
         g.beginPath();
         it.pts.forEach((p, i) => (i ? g.lineTo(p.x, p.y) : g.moveTo(p.x, p.y)));
         g.stroke();
         const mm = polyLen(it.pts) * state.mmPerPx;
         const end = it.pts[it.pts.length - 1];
+        if (compact) { badge(end, "L" + (li + 1), it.color || "#7a4fbf"); return; }
         const label = `${it.name}: ${(mm / 1000).toFixed(2)} m`;
         const tw = g.measureText(label).width;
         g.fillStyle = "rgba(255,255,255,.85)"; g.fillRect(end.x - tw / 2 - 4, end.y - 26, tw + 8, 20);
         g.fillStyle = it.color || "#7a4fbf"; g.textAlign = "center"; g.fillText(label, end.x, end.y - 11);
       });
       const cr = Math.max(9, state.iw / 130);
-      state.counts.forEach((it) => {
+      state.counts.forEach((it, ci) => {
         g.fillStyle = it.color || "#c0397a";
         it.pts.forEach((p, i) => {
           g.beginPath(); g.arc(p.x, p.y, cr, 0, 7); g.fill();
@@ -3980,7 +3991,9 @@
           g.fillText(String(i + 1), p.x, p.y + 1);
           g.fillStyle = it.color || "#c0397a";
         });
-        if (it.pts.length) {
+        if (compact && it.pts.length) {
+          badge({ x: it.pts[0].x, y: it.pts[0].y - cr * 2.6 }, "C" + (ci + 1), it.color || "#c0397a");
+        } else if (it.pts.length) {
           const p0 = it.pts[0];
           const lbl = `${it.name} ×${it.qty != null ? it.qty : it.pts.length}`;
           const tw = g.measureText(lbl).width;
@@ -3991,7 +4004,7 @@
       g.textBaseline = "alphabetic";
       g.strokeStyle = getVar("--accent") || "#e0481c";
       g.lineWidth = Math.max(2, state.iw / 1100);
-      state.measures.forEach((mm) => {
+      (compact ? [] : state.measures).forEach((mm) => {
         g.beginPath(); g.moveTo(mm.a.x, mm.a.y); g.lineTo(mm.b.x, mm.b.y); g.stroke();
         const mid = { x: (mm.a.x + mm.b.x) / 2, y: (mm.a.y + mm.b.y) / 2 };
         const t = Math.round(dist(mm.a, mm.b) * state.mmPerPx) + " mm";
@@ -4049,20 +4062,92 @@
 
   // ---------- Print / Export PDF: the marked-up floor plan only ----------
   const PLAN_K = 12.6; // px per mm on the page canvas (320 dpi)
-  // one page, A4, landscape or portrait to suit the plan: the annotated plan fitted inside a small margin
+  // legend rows for the exported plan: every room / run / count with its measured figure
+  function planLegendRows() {
+    const u2 = state.units === "ft" ? "ft²" : "m²";
+    const rows = [];
+    state.spaces.forEach((sp, i) => {
+      const m = polyMetrics(sp.pts); if (m.areaFt2 == null) return;
+      const q = state.units === "ft" ? m.areaFt2 : m.areaM2, dd = sp.op === "deduct";
+      rows.push({ tag: String(i + 1), color: sp.color, name: sp.name + (dd ? " (deduct)" : ""), val: (dd ? "−" : "") + q.toFixed(1) + " " + u2 });
+    });
+    if (state.mmPerPx) state.lines.forEach((it, i) => {
+      const mm = polyLen(it.pts) * state.mmPerPx;
+      rows.push({ tag: "L" + (i + 1), color: it.color || "#7a4fbf", name: it.name, val: state.units === "ft" ? (mm / 304.8).toFixed(1) + " ft" : (mm / 1000).toFixed(2) + " m" });
+    });
+    state.counts.forEach((it, i) => {
+      rows.push({ tag: "C" + (i + 1), color: it.color || "#c0397a", name: it.name, val: "× " + (it.qty != null ? it.qty : it.pts.length) });
+    });
+    return rows;
+  }
+  // draw the legend box with its top-right corner at (x+w, y); returns the height used (mm). Sizes in mm × K.
+  function drawPlanLegend(g, x, y, w, maxH) {
+    const K = PLAN_K, rows = planLegendRows(), t = totals();
+    const title = (state.meta.project || state.meta.client || (state.fileName || "Floor plan").replace(/\s*·\s*p\.\d+$/, "")).slice(0, 80);
+    const sub = [];
+    if (state.mmPerPx) sub.push("Scale 1 px = " + state.mmPerPx.toFixed(2) + " mm");
+    sub.push(new Date().toLocaleDateString("en-SG", { day: "numeric", month: "short", year: "numeric" }));
+    const total = state.spaces.length ? `Total area ${(state.units === "ft" ? t.totF : t.totM).toFixed(1)} ${state.units === "ft" ? "ft²" : "m²"}${state.units === "ft" ? " (" + t.totM.toFixed(1) + " m²)" : ""}` : "";
+    const pad = 3, headH = 11 + (total ? 0 : 0), footH = total ? 7 : 0;
+    let rowH = 5.2;
+    const avail = maxH - pad * 2 - headH - footH;
+    if (rows.length * rowH > avail) rowH = Math.max(3.4, avail / Math.max(1, rows.length));
+    const fs = Math.min(3.3, rowH * 0.66);
+    const shown = Math.min(rows.length, Math.max(0, Math.floor(avail / rowH)));
+    const h = pad * 2 + headH + shown * rowH + (rows.length > shown ? rowH : 0) + footH;
+    g.save();
+    g.fillStyle = "#fff"; g.fillRect(x * K, y * K, w * K, h * K);
+    g.strokeStyle = "#1b2429"; g.lineWidth = 0.35 * K; g.strokeRect(x * K, y * K, w * K, h * K);
+    const font = (px, wt) => `${wt || 400} ${(px * K).toFixed(1)}px "IBM Plex Sans", "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei", Arial, sans-serif`;
+    const fit = (s, maxW, f) => { g.font = f; if (g.measureText(s).width <= maxW * K) return s; while (s.length > 1 && g.measureText(s + "…").width > maxW * K) s = s.slice(0, -1); return s + "…"; };
+    g.textBaseline = "alphabetic"; g.textAlign = "left";
+    g.fillStyle = "#1b2429"; g.font = font(3.9, 700);
+    g.fillText(fit(title, w - pad * 2, font(3.9, 700)), (x + pad) * K, (y + pad + 3.6) * K);
+    g.fillStyle = "#5d6a70"; g.font = font(2.8, 400);
+    g.fillText(fit(sub.join("  ·  "), w - pad * 2, font(2.8, 400)), (x + pad) * K, (y + pad + 7.6) * K);
+    let ry = y + pad + headH;
+    g.strokeStyle = "#d4d9d1"; g.lineWidth = 0.2 * K; g.beginPath(); g.moveTo((x + pad) * K, (ry - 1.6) * K); g.lineTo((x + w - pad) * K, (ry - 1.6) * K); g.stroke();
+    for (let i = 0; i < shown; i++) {
+      const r = rows[i], cy = ry + i * rowH + rowH / 2;
+      const br = Math.min(2.2, rowH * 0.42);
+      g.fillStyle = r.color; g.beginPath(); g.arc((x + pad + br) * K, cy * K, br * K, 0, 7); g.fill();
+      g.fillStyle = "#fff"; g.textAlign = "center"; g.font = font(br * (r.tag.length > 1 ? 1.05 : 1.3), 700);
+      g.fillText(r.tag, (x + pad + br) * K, (cy + br * 0.38) * K);
+      g.textAlign = "left";
+      g.font = font(fs, 600); const vw = g.measureText(r.val).width / K;
+      g.fillStyle = "#1b2429"; g.textAlign = "right"; g.fillText(r.val, (x + w - pad) * K, (cy + fs * 0.35) * K);
+      g.textAlign = "left"; g.font = font(fs, 500);
+      g.fillText(fit(r.name, w - pad * 2 - br * 2 - 2 - vw - 2, font(fs, 500)), (x + pad + br * 2 + 2) * K, (cy + fs * 0.35) * K);
+    }
+    if (rows.length > shown) { g.fillStyle = "#5d6a70"; g.font = font(fs, 400); g.fillText(`+ ${rows.length - shown} more`, (x + pad) * K, (ry + shown * rowH + rowH * 0.7) * K); }
+    if (total) {
+      const fy = y + h - pad - 1;
+      g.strokeStyle = "#d4d9d1"; g.beginPath(); g.moveTo((x + pad) * K, (fy - 4.6) * K); g.lineTo((x + w - pad) * K, (fy - 4.6) * K); g.stroke();
+      g.fillStyle = "#e0481c"; g.font = font(3.3, 700); g.fillText(fit(total, w - pad * 2, font(3.3, 700)), (x + pad) * K, fy * K);
+    }
+    g.restore();
+    return h;
+  }
+
+  // one page, A4, landscape or portrait: plan with small numbered markers (nothing drawn over the drawing's own
+  // content), and the figures in a legend box at the top right
   function renderPlanPage() {
-    const img = renderFullCanvas();
+    const img = renderFullCanvas(true);
     const land = img.width >= img.height;
-    const Wmm = land ? 297 : 210, Hmm = land ? 210 : 297, mg = 8;
+    const Wmm = land ? 297 : 210, Hmm = land ? 210 : 297, mg = 8, legW = land ? 78 : 92;
     const c = document.createElement("canvas");
     c.width = Math.round(Wmm * PLAN_K); c.height = Math.round(Hmm * PLAN_K);
     const g = c.getContext("2d");
     g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
-    const bw = (Wmm - 2 * mg) * PLAN_K, bh = (Hmm - 2 * mg) * PLAN_K;
-    const k = Math.min(bw / img.width, bh / img.height);
+    const legX = Wmm - mg - legW;
+    const legH = drawPlanLegend(g, legX, mg, legW, Hmm - 2 * mg);
+    // plan area: beside the legend on landscape, below it on portrait
+    const ax = mg, ay = land ? mg : mg + legH + 4;
+    const aw = land ? legX - mg - 4 : Wmm - 2 * mg, ah = Hmm - mg - ay;
+    const k = Math.min(aw * PLAN_K / img.width, ah * PLAN_K / img.height);
     const w = img.width * k, h = img.height * k;
     g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high";
-    g.drawImage(img, (c.width - w) / 2, (c.height - h) / 2, w, h);
+    g.drawImage(img, ax * PLAN_K + (aw * PLAN_K - w) / 2, ay * PLAN_K + (ah * PLAN_K - h) / 2, w, h);
     return { canvas: c, land, Wmm, Hmm };
   }
 
