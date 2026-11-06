@@ -2363,7 +2363,9 @@
     state.calib = null;
     closePop();
     recomputeScale();
-    toast("Scale set · " + fmtScale());
+    { const wm = state.src ? state.iw * state.mmPerPx / 1000 : 0;
+      if (state.src && (wm < 2 || wm > 400)) toast("Scale set · " + fmtScale() + " — but that makes the plan " + (wm < 10 ? wm.toFixed(2) : Math.round(wm)) + " m wide. Check the length and unit you typed.");
+      else toast("Scale set · " + fmtScale()); }
     if (state.mode === "calibrate" && state.spaces.length === 0) setMode("draw");
   }
   function fmtScale() {
@@ -4185,6 +4187,11 @@
     if (spec.denom) {
       if (!state.mmPerPx) { const e = new Error("scale"); e.userMsg = "Set the plan's scale first — a drawing scale needs it"; throw e; }
       const wmm = img.width * state.mmPerPx / spec.denom, hmm = img.height * state.mmPerPx / spec.denom;
+      if (wmm < aw * 0.06 && hmm < ah * 0.06) {
+        const e = new Error("tiny");
+        e.userMsg = `The plan's scale looks wrong: it measures only ${(img.width * state.mmPerPx / 1000).toFixed(2)} m wide (1 px = ${state.mmPerPx.toFixed(3)} mm), so at 1:${spec.denom} it would be a speck. Re-draw the reference line and check its length and unit (mm / m).`;
+        throw e;
+      }
       if (wmm > aw + 0.5 || hmm > ah + 0.5) {
         const need = Math.max(wmm / aw, hmm / ah) * spec.denom;
         const next = PLAN_SCALES.find((d) => d >= need) || Math.ceil(need);
