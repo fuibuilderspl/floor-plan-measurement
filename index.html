@@ -2727,6 +2727,14 @@
       d.querySelector(".x").addEventListener("click", () => { pushHistory(); state.measures.splice(i, 1); persist(); renderPanel(); render(); });
       list.appendChild(d);
     });
+    if (state.measures.length && state.mmPerPx) {
+      const totMm = state.measures.reduce((t, m) => t + dist(m.a, m.b) * state.mmPerPx, 0);
+      const d = document.createElement("div");
+      d.className = "ref";
+      d.style.cssText = "border-top:1px solid var(--line-strong);padding-top:7px;margin-top:2px;font-weight:600;color:var(--ink)";
+      d.innerHTML = `<span>Total · ${state.measures.length} line${state.measures.length > 1 ? "s" : ""}</span><span>${(totMm / 304.8).toFixed(2)} ft  (${(totMm / 1000).toFixed(3)} m · ${nf.format(Math.round(totMm))} mm)</span>`;
+      list.appendChild(d);
+    }
     if (state.measures.length > 1) {
       const c = document.createElement("button");
       c.className = "btn ghost sm"; c.textContent = "Clear all ruler lines";
