@@ -717,13 +717,25 @@
           <button class="btn primary" id="printDoc" type="button">🖨 Print</button>
           <button class="btn primary" id="savePdf" type="button">⬇ Export PDF</button>
         </div>
+        <div class="row wrap" id="planSpec" style="align-items:flex-end">
+          <label class="field" style="flex:1;min-width:92px">Paper / 纸张
+            <select id="specPaper"><option>A4</option><option selected>A3</option><option>A2</option><option>A1</option><option>A0</option></select></label>
+          <label class="field" style="flex:1.4;min-width:130px">Scale / 比例
+            <select id="specScale">
+              <option value="fit">Fit to page (not to scale)</option>
+              <option value="20">1 : 20</option><option value="50">1 : 50</option><option value="75">1 : 75</option>
+              <option value="100">1 : 100</option><option value="150">1 : 150</option><option value="200">1 : 200</option>
+              <option value="250">1 : 250</option><option value="500">1 : 500</option><option value="custom">Custom…</option>
+            </select></label>
+          <label class="field" id="specCustomWrap" style="width:84px;display:none">1 : <input type="number" id="specCustom" min="1" step="1" value="100" /></label>
+        </div>
         <div class="row wrap">
           <button class="btn" id="copyRep">Copy quote</button>
           <button class="btn" id="saveRep">Save .txt</button>
           <button class="btn" id="saveCsv">Save .csv</button>
           <button class="btn" id="savePng">Save image</button>
         </div>
-        <div class="note"><b>Print / PDF</b> outputs the floor plan only — the plan with every room, wall run and count you marked, with its area / length / quantity label. Page is A4, landscape or portrait to suit the plan. <b>Copy quote</b>, <b>.txt</b> and <b>.csv</b> carry the priced quote.</div>
+        <div class="note"><b>Print / PDF</b> outputs the floor plan only — the plan with numbered markers, and a label at the top right listing every room, wall run and count with its figure plus the drawing spec (e.g. <b>Scale 1:100 @ A3</b>). Pick the paper and scale above: with a scale chosen the plan is drawn <b>true to that scale</b> (it tells you if it doesn't fit); "Fit to page" just enlarges it to fill the sheet. Landscape or portrait follows the plan. <b>Copy quote</b>, <b>.txt</b> and <b>.csv</b> carry the priced quote.</div>
       </div>
     </section>
 
@@ -792,7 +804,7 @@
   const toast = (() => {
     const el = $("#toast");
     let t;
-    return (msg) => { el.textContent = msg; el.classList.add("show"); clearTimeout(t); t = setTimeout(() => el.classList.remove("show"), 2200); };
+    return (msg) => { el.textContent = msg; el.classList.add("show"); clearTimeout(t); t = setTimeout(() => el.classList.remove("show"), Math.max(2200, String(msg).length * 55)); };
   })();
 
   // ---------- state ----------
@@ -4061,7 +4073,25 @@
   $("#savePng").addEventListener("click", async () => { if (state.src) save("takeoff-annotated.png", await renderFullPng()); });
 
   // ---------- Print / Export PDF: the marked-up floor plan only ----------
-  const PLAN_K = 12.6; // px per mm on the page canvas (320 dpi)
+  let PLAN_K = 12.6; // px per mm on the page canvas (320 dpi; lower on A1 / A0 to keep the image a sane size)
+  const PLAN_PAPERS = { A4: [210, 297], A3: [297, 420], A2: [420, 594], A1: [594, 841], A0: [841, 1189] };
+  const PLAN_SCALES = [20, 50, 75, 100, 150, 200, 250, 500, 1000, 2000];
+  function planSpec() {
+    const paper = $("#specPaper").value, sc = $("#specScale").value;
+    let denom = null;
+    if (sc === "custom") denom = Math.round(+$("#specCustom").value) || null;
+    else if (sc !== "fit") denom = +sc;
+    $("#specCustomWrap").style.display = sc === "custom" ? "" : "none";
+    try { localStorage.setItem("fb_planspec", JSON.stringify({ paper, sc, custom: $("#specCustom").value })); } catch (e) {}
+    return { paper, denom, text: denom ? `Scale 1:${denom} @ ${paper}` : `${paper} · fit to page, not to scale` };
+  }
+  (function initSpec() {
+    let o = null;
+    try { o = JSON.parse(localStorage.getItem("fb_planspec") || "null"); } catch (e) {}
+    if (o) { $("#specPaper").value = o.paper || "A3"; $("#specScale").value = o.sc || "fit"; if (o.custom) $("#specCustom").value = o.custom; }
+    $("#specCustomWrap").style.display = $("#specScale").value === "custom" ? "" : "none";
+    ["#specPaper", "#specScale", "#specCustom"].forEach((id) => $(id).addEventListener("change", planSpec));
+  })();
   // legend rows for the exported plan: every room / run / count with its measured figure
   function planLegendRows() {
     const u2 = state.units === "ft" ? "ft²" : "m²";
@@ -4081,14 +4111,14 @@
     return rows;
   }
   // draw the legend box with its top-right corner at (x+w, y); returns the height used (mm). Sizes in mm × K.
-  function drawPlanLegend(g, x, y, w, maxH) {
-    const K = PLAN_K, rows = planLegendRows(), t = totals();
+  function drawPlanLegend(g, x, y, w, maxH, f, specText) {
+    const K = PLAN_K * (f || 1), rows = planLegendRows(), t = totals();
     const title = (state.meta.project || state.meta.client || (state.fileName || "Floor plan").replace(/\s*·\s*p\.\d+$/, "")).slice(0, 80);
     const sub = [];
     if (state.mmPerPx) sub.push("Scale 1 px = " + state.mmPerPx.toFixed(2) + " mm");
     sub.push(new Date().toLocaleDateString("en-SG", { day: "numeric", month: "short", year: "numeric" }));
     const total = state.spaces.length ? `Total area ${(state.units === "ft" ? t.totF : t.totM).toFixed(1)} ${state.units === "ft" ? "ft²" : "m²"}${state.units === "ft" ? " (" + t.totM.toFixed(1) + " m²)" : ""}` : "";
-    const pad = 3, headH = 11 + (total ? 0 : 0), footH = total ? 7 : 0;
+    const pad = 3, headH = 15, footH = total ? 7 : 0;
     let rowH = 5.2;
     const avail = maxH - pad * 2 - headH - footH;
     if (rows.length * rowH > avail) rowH = Math.max(3.4, avail / Math.max(1, rows.length));
@@ -4103,8 +4133,10 @@
     g.textBaseline = "alphabetic"; g.textAlign = "left";
     g.fillStyle = "#1b2429"; g.font = font(3.9, 700);
     g.fillText(fit(title, w - pad * 2, font(3.9, 700)), (x + pad) * K, (y + pad + 3.6) * K);
+    g.fillStyle = "#16788a"; g.font = font(3.3, 700);
+    g.fillText(fit(specText || "", w - pad * 2, font(3.3, 700)), (x + pad) * K, (y + pad + 7.9) * K);
     g.fillStyle = "#5d6a70"; g.font = font(2.8, 400);
-    g.fillText(fit(sub.join("  ·  "), w - pad * 2, font(2.8, 400)), (x + pad) * K, (y + pad + 7.6) * K);
+    g.fillText(fit(sub.join("  ·  "), w - pad * 2, font(2.8, 400)), (x + pad) * K, (y + pad + 11.8) * K);
     let ry = y + pad + headH;
     g.strokeStyle = "#d4d9d1"; g.lineWidth = 0.2 * K; g.beginPath(); g.moveTo((x + pad) * K, (ry - 1.6) * K); g.lineTo((x + w - pad) * K, (ry - 1.6) * K); g.stroke();
     for (let i = 0; i < shown; i++) {
@@ -4132,20 +4164,39 @@
   // one page, A4, landscape or portrait: plan with small numbered markers (nothing drawn over the drawing's own
   // content), and the figures in a legend box at the top right
   function renderPlanPage() {
+    const spec = planSpec();
     const img = renderFullCanvas(true);
     const land = img.width >= img.height;
-    const Wmm = land ? 297 : 210, Hmm = land ? 210 : 297, mg = 8, legW = land ? 78 : 92;
+    const [ps, pl] = PLAN_PAPERS[spec.paper] || PLAN_PAPERS.A3;
+    const Wmm = land ? pl : ps, Hmm = land ? ps : pl;
+    const f = Math.max(1, pl / 420);                 // legend / margins grow on the big sheets so they stay readable
+    const mg = 8 * f, legW = (land ? 78 : 92) * f;
+    PLAN_K = Math.min(12.6, 5200 / pl);
     const c = document.createElement("canvas");
     c.width = Math.round(Wmm * PLAN_K); c.height = Math.round(Hmm * PLAN_K);
     const g = c.getContext("2d");
     g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
     const legX = Wmm - mg - legW;
-    const legH = drawPlanLegend(g, legX, mg, legW, Hmm - 2 * mg);
+    const legH = drawPlanLegend(g, legX / f, mg / f, legW / f, (Hmm - 2 * mg) / f, f, spec.text) * f;
     // plan area: beside the legend on landscape, below it on portrait
-    const ax = mg, ay = land ? mg : mg + legH + 4;
-    const aw = land ? legX - mg - 4 : Wmm - 2 * mg, ah = Hmm - mg - ay;
-    const k = Math.min(aw * PLAN_K / img.width, ah * PLAN_K / img.height);
-    const w = img.width * k, h = img.height * k;
+    const ax = mg, ay = land ? mg : mg + legH + 4 * f;
+    const aw = land ? legX - mg - 4 * f : Wmm - 2 * mg, ah = Hmm - mg - ay;
+    let w, h;   // px on the page canvas
+    if (spec.denom) {
+      if (!state.mmPerPx) { const e = new Error("scale"); e.userMsg = "Set the plan's scale first — a drawing scale needs it"; throw e; }
+      const wmm = img.width * state.mmPerPx / spec.denom, hmm = img.height * state.mmPerPx / spec.denom;
+      if (wmm > aw + 0.5 || hmm > ah + 0.5) {
+        const need = Math.max(wmm / aw, hmm / ah) * spec.denom;
+        const next = PLAN_SCALES.find((d) => d >= need) || Math.ceil(need);
+        const e = new Error("fit");
+        e.userMsg = `At 1:${spec.denom} the plan is ${Math.round(wmm)} × ${Math.round(hmm)} mm — too big for ${spec.paper}. Try 1:${next} or a larger paper.`;
+        throw e;
+      }
+      w = wmm * PLAN_K; h = hmm * PLAN_K;
+    } else {
+      const k = Math.min(aw * PLAN_K / img.width, ah * PLAN_K / img.height);
+      w = img.width * k; h = img.height * k;
+    }
     g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high";
     g.drawImage(img, ax * PLAN_K + (aw * PLAN_K - w) / 2, ay * PLAN_K + (ah * PLAN_K - h) / 2, w, h);
     return { canvas: c, land, Wmm, Hmm };
@@ -4199,7 +4250,7 @@
       } else {
         let ps = $("#pageStyle");
         if (!ps) { ps = document.createElement("style"); ps.id = "pageStyle"; document.head.appendChild(ps); }
-        ps.textContent = `@media print { @page { size: A4 ${pg.land ? "landscape" : "portrait"}; margin: 0; } #printRoot img.pp { width: ${pg.Wmm}mm; height: ${pg.Hmm}mm; } }`;
+        ps.textContent = `@media print { @page { size: ${pg.Wmm}mm ${pg.Hmm}mm; margin: 0; } #printRoot img.pp { width: ${pg.Wmm}mm; height: ${pg.Hmm}mm; } }`;
         const root = $("#printRoot");
         root.innerHTML = "";
         const im = new Image(); im.className = "pp"; im.src = pg.canvas.toDataURL("image/jpeg", 0.92);
@@ -4210,7 +4261,7 @@
       }
     } catch (e) {
       console.error(e);
-      toast("Couldn't prepare the floor plan");
+      toast(e && e.userMsg ? e.userMsg : "Couldn't prepare the floor plan");
     } finally {
       planBusy = false;
       btns.forEach((b) => (b.disabled = false));
