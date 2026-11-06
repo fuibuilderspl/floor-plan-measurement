@@ -644,6 +644,15 @@
         <div class="note" id="scanNote" style="display:none"></div>
         <div id="scanList" style="display:flex;flex-direction:column;gap:5px"></div>
         <div id="refList" style="display:flex;flex-direction:column;gap:6px"></div>
+        <div id="paperScale" style="display:none;flex-direction:column;gap:7px;border:1px dashed var(--line-strong);border-radius:9px;padding:10px">
+          <div class="note" id="psNote"></div>
+          <div class="row wrap" style="align-items:flex-end">
+            <label class="field" style="flex:1;min-width:110px">Drawing scale / 比例
+              <select id="psDenom"><option>20</option><option>50</option><option>75</option><option selected>100</option><option>150</option><option>200</option><option>250</option><option>500</option><option value="custom">Custom…</option></select></label>
+            <label class="field" id="psCustomWrap" style="width:84px;display:none">1 : <input type="number" id="psCustom" min="1" step="1" value="100" /></label>
+            <button class="btn teal" id="psUse" type="button">Use actual size</button>
+          </div>
+        </div>
         <div class="note"><b>Scan</b> reads every printed dimension on the plan (needs internet the first time, ~15&nbsp;s). Tap one → it zooms you to that number with the value filled in → draw the line over it → Apply. Or just draw manually: over a known dimension, or across a door leaf = <b>900&nbsp;mm</b>. Several references combine for a better scale.<br />Drew it wrong? Right-click (or the ⌫ / ↻ Redraw buttons) removes the last point or the whole line so you can draw it again. An applied reference can be removed with the ✕ next to it, or its ends dragged in Edit mode.</div>
       </div>
     </section>
@@ -839,6 +848,8 @@
     snapKind: null,      // "corner" | "edge"
     guides: [],          // [{axis:'x'|'y', at}] alignment guides
     pdfPage: 0,          // index of the page shown from the open PDF
+    pdfInfo: null,       // {pxPerMm (image px per paper-mm), paper:[mm,mm]} for a vector-PDF page
+    autoScale: null,     // {mmPerPx, denom} scale taken from paper size + drawing scale (used while no reference lines exist)
     pdfTexts: null,      // [{s,fx,fy,fh}] text runs read from the vector PDF page (fractions of the image)
     loupe: true,         // magnifier while placing points
     srcBlob: null,       // PNG blob of the loaded image (for session restore)
@@ -970,7 +981,7 @@
   }
 
   function recomputeScale() {
-    if (!state.refs.length) { state.mmPerPx = null; }
+    if (!state.refs.length) { state.mmPerPx = state.autoScale ? state.autoScale.mmPerPx : null; }
     else {
       let sumMm = 0, sumPx = 0;
       for (const r of state.refs) { sumMm += r.mm; sumPx += dist(r.a, r.b); }
@@ -2359,6 +2370,7 @@
     const u = $("#popUnit").value;
     const mm = v * ({ mm: 1, cm: 10, m: 1000, ft: 304.8, in: 25.4 }[u]);
     pushHistory();
+    state.autoScale = null;
     state.refs.push({ a: state.calib.a, b: state.calib.b, mm });
     state.calib = null;
     closePop();
@@ -2626,6 +2638,14 @@
       d.querySelector(".x").addEventListener("click", () => { pushHistory(); state.refs.splice(i, 1); recomputeScale(); persist(); });
       rl.appendChild(d);
     });
+    if (state.autoScale && !state.refs.length) {
+      const d = document.createElement("div");
+      d.className = "ref";
+      d.innerHTML = `<span>Sheet</span><span>1:${state.autoScale.denom} on the PDF paper</span><button class="x" title="Remove">✕</button>`;
+      d.querySelector(".x").addEventListener("click", () => { state.autoScale = null; recomputeScale(); persist(); });
+      rl.appendChild(d);
+    }
+    updatePaperScaleUI();
 
     // spaces
     const canDraw = !!state.mmPerPx;
@@ -2898,6 +2918,51 @@
   }
   function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
+  // ---------- actual size from the PDF sheet: paper size x drawing scale ----------
+  function titleBlockScales() { // "1:100" style texts on the sheet -> [[denom, count], ...] most frequent first
+    const n = {};
+    (state.pdfTexts || []).forEach((t) => { const m = /(?:^|[^\d.:])1\s*:\s*(\d{2,4})(?!\d)/.exec(t.s); if (m) n[+m[1]] = (n[+m[1]] || 0) + 1; });
+    return Object.entries(n).map(([k, v]) => [+k, v]).sort((a, b) => b[1] - a[1]);
+  }
+  function setPdfInfo(info) {
+    state.pdfInfo = info ? { pxPerMm: info.pxPerMm * state.iw / info.cw, paper: info.paper } : null;
+    const bx = $("#paperScale"); if (bx) delete bx.dataset.set;
+    if (!state.pdfInfo) { updatePaperScaleUI(); return; }
+    const f = titleBlockScales();
+    if (f.length && !state.mmPerPx) { // one clear scale on the sheet: apply it straight away, user can change it
+      if (f.length === 1 || f[0][1] > f[1][1]) { applyPaperScale(f[0][0], true); }
+    }
+    updatePaperScaleUI();
+  }
+  function applyPaperScale(denom, auto) {
+    if (!state.pdfInfo || !(denom > 0)) return;
+    state.autoScale = { mmPerPx: denom / state.pdfInfo.pxPerMm, denom };
+    if (!state.refs.length) { recomputeScale(); persist(); }
+    const wm = state.iw * state.autoScale.mmPerPx / 1000;
+    toast(`${auto ? "Actual size set from the sheet" : "Actual size set"} · 1:${denom} → plan is ${wm.toFixed(1)} m wide. Check it against a door (900 mm).`);
+  }
+  function updatePaperScaleUI() {
+    const box = $("#paperScale"); if (!box) return;
+    if (!state.pdfInfo) { box.style.display = "none"; return; }
+    box.style.display = "flex";
+    const [a, b] = state.pdfInfo.paper.slice().sort((x, y) => x - y);
+    const sheets = { A4: [210, 297], A3: [297, 420], A2: [420, 594], A1: [594, 841], A0: [841, 1189] };
+    const name = Object.keys(sheets).find((k) => Math.abs(sheets[k][0] - a) < 3 && Math.abs(sheets[k][1] - b) < 3);
+    const f = titleBlockScales();
+    $("#psNote").innerHTML = `<b>Actual size from the PDF sheet.</b> This page is ${name || "a"} sheet (${Math.round(a)} × ${Math.round(b)} mm)` + (f.length ? `; the title block says <b>${f.map((x) => "1:" + x[0]).slice(0, 3).join(", ")}</b>` : "") + `. Pick the drawing scale and the plan is sized from the real paper — no reference line needed (assumes the PDF is the full-size sheet).`;
+    const sel = $("#psDenom");
+    if (f.length && !box.dataset.set) {
+      box.dataset.set = "1";
+      if ([...sel.options].some((o) => o.value === String(f[0][0]))) sel.value = String(f[0][0]); else { sel.value = "custom"; $("#psCustom").value = f[0][0]; }
+    }
+    $("#psCustomWrap").style.display = sel.value === "custom" ? "" : "none";
+  }
+  $("#psDenom").addEventListener("change", updatePaperScaleUI);
+  $("#psUse").addEventListener("click", () => {
+    const v = $("#psDenom").value;
+    applyPaperScale(v === "custom" ? Math.round(+$("#psCustom").value) : +v, false);
+  });
+
   // ---------- modes ----------
   function setMode(m) {
     if (/^(draw|rect|measure|line|count)$/.test(m) && !state.mmPerPx) { toast("Set the scale first"); m = "calibrate"; }
@@ -3074,7 +3139,7 @@
     const name = nameOverride || file.name || "image";
     $("#pdfNote").style.display = "none";
     try {
-      let bmp, title = name, pdfNote = null, pageTexts = null;
+      let bmp, title = name, pdfNote = null, pageTexts = null, pageInfo = null;
       if (/pdf$/i.test(file.type) || /\.pdf$/i.test(name)) {
         toast("Reading PDF…");
         const abuf = await file.arrayBuffer();
@@ -3099,7 +3164,7 @@
           curPdf = pdf; state.pdfPage = idx; pdfPagerUI();
           return;
         }
-        bmp = res.bitmap; pageTexts = res.texts || null;
+        bmp = res.bitmap; pageTexts = res.texts || null; pageInfo = res.info || null;
         curPdf = pdf; state.pdfPage = idx;
         if (pdf.pages.length > 1) title = `${name} · p.${idx + 1}`;
         pdfNote = res.kind === "scan"
@@ -3110,7 +3175,7 @@
         bmp = await createImageBitmap(file);
       }
       await adoptBitmap(bmp, title, curPdf ? PDF_PX : 3400);
-      state.pdfTexts = pageTexts;
+      state.pdfTexts = pageTexts; setPdfInfo(pageInfo);
       if (pdfNote) { $("#pdfNote").style.display = "block"; $("#pdfNote").textContent = pdfNote; }
       pdfPagerUI();
     } catch (err) {
@@ -3132,7 +3197,7 @@
       state.pdfPage = idx; pdfPagerUI();
       const base = (state.fileName || "PDF").replace(/ · p\.\d+$/, "");
       await adoptBitmap(res.bitmap, `${base} · p.${idx + 1}`, PDF_PX);
-      state.pdfTexts = res.texts || null;
+      state.pdfTexts = res.texts || null; setPdfInfo(res.info || null);
       $("#pdfNote").style.display = "block";
       $("#pdfNote").textContent = res.kind === "scan" ? "Scanned PDF — using the page's picture." : "✓ Drawn from the vector PDF. If any lines look missing, export the page as an image from your PDF viewer instead.";
     } finally { pdfBusy = false; pdfPagerUI(); }
@@ -3148,7 +3213,7 @@
   // make a bitmap the current plan (shared by images, PDFs and PDF page switches)
   async function adoptBitmap(bmp, name, maxDim) {
     bmp = await downscale(bmp, maxDim || 3400);
-    state.pdfTexts = null;
+    state.pdfTexts = null; state.pdfInfo = null; state.autoScale = null;
     state.src = bmp;
     state.iw = bmp.width; state.ih = bmp.height;
     state.enhanced = null;
@@ -3185,7 +3250,7 @@
     $("#empty").classList.remove("hide");
     $("#fileInfo").textContent = "No file loaded.";
     $("#pdfNote").style.display = "none";
-    curPdf = null; state.pdfPage = 0; state.pdfTexts = null; pdfPagerUI();
+    curPdf = null; state.pdfPage = 0; state.pdfTexts = null; state.pdfInfo = null; state.autoScale = null; pdfPagerUI();
     IDB.del("session");
     renderPanel(); render(); setMode("pan");
   });
@@ -3673,6 +3738,7 @@
       vals.length = 0;
     }
     if (drew < 3) return null;
+    c.pdfInfo = { pxPerMm: s * 72 / 25.4, cw: c.width, paper: [mbw * 25.4 / 72, mbh * 25.4 / 72] };
     if (fonts) {
       c.pdfTexts = mergedTexts().map((t) => ({
         s: t.s.trim(),
@@ -3737,7 +3803,7 @@
     const pn = pdf.pages[idx];
     let kind = "vector", cv = null;
     try { cv = await renderVectorPage(pdf, pn, maxPx || PDF_PX); } catch (e) { console.warn("vector render failed", e); }
-    if (cv) return { bitmap: await createImageBitmap(cv), kind, texts: cv.pdfTexts || null };
+    if (cv) return { bitmap: await createImageBitmap(cv), kind, texts: cv.pdfTexts || null, info: cv.pdfInfo || null };
     const bmp = await rasterFromPage(pdf, pn).catch(() => null);
     if (bmp) return { bitmap: bmp, kind: "scan" };
     return null;
@@ -3810,7 +3876,7 @@
         v: 2, savedAt: Date.now(),
         fileName: state.fileName, iw: state.iw, ih: state.ih,
         units: state.units, rate: state.rate,
-        mmPerPx: state.mmPerPx, refs: state.refs, spaces: state.spaces, lines: state.lines, counts: state.counts, measures: state.measures,
+        mmPerPx: state.mmPerPx, autoScale: state.autoScale, refs: state.refs, spaces: state.spaces, lines: state.lines, counts: state.counts, measures: state.measures,
         meta: state.meta, enh: state.enh, idc,
         img: state.srcBlob || null,
       });
@@ -3841,7 +3907,7 @@
       syncEnhInputs(); applyEnhance();
       recomputeScale(); fit(); renderPanel(); updateHud();
       setMode(state.mmPerPx ? "edit" : "calibrate");
-      curPdf = null; state.pdfTexts = null; pdfPagerUI();
+      curPdf = null; state.pdfTexts = null; state.pdfInfo = null; state.autoScale = s.autoScale || null; pdfPagerUI();
       toast("Restored your last session — “Remove” to start over");
     } catch (e) { console.warn("restore failed", e); }
   }
@@ -4480,7 +4546,7 @@
   })();
 
   if (location.hostname === "localhost" || location.protocol === "file:") {
-    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize, loadFile, openPdf, pdfPageBitmap, renderVectorPage, gotoPdfPage, loadPdfFonts, renderPlanPage, planToPdf, runPlanExport, renderFullCanvas, rotatePlan };
+    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize, loadFile, openPdf, pdfPageBitmap, renderVectorPage, gotoPdfPage, loadPdfFonts, renderPlanPage, planToPdf, runPlanExport, renderFullCanvas, rotatePlan, applyPaperScale, setPdfInfo };
   }
 })();
 </script>
