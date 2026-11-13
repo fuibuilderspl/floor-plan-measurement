@@ -920,6 +920,7 @@
 
   function fit() {
     if (!state.src) return;
+    if (W() < 50 || H() < 50) resize(); // layout may have changed since the canvas was last sized
     const pad = 40;
     const s = Math.min((W() - pad * 2) / state.iw, (H() - pad * 2) / state.ih);
     state.view.s = s > 0 ? s : 1;
@@ -3244,6 +3245,11 @@
     applyEnhance();
     fit();
     renderPanel();
+    // the panel / pager rows appear while loading and can change the stage size: re-fit once it settles
+    // (only if the user hasn't moved the view meanwhile)
+    { let snap = JSON.stringify(state.view);
+      const again = () => { if (JSON.stringify(state.view) === snap) { resize(); fit(); snap = JSON.stringify(state.view); } };
+      setTimeout(again, 80); setTimeout(again, 450); }
     setMode("calibrate");
     persist();
     toast("Loaded · now set the scale");
