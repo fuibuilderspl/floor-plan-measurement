@@ -3354,26 +3354,23 @@
 
   // ---------- PDF reader: page tree + vector page renderer (no library) ----------
   function a85decode(u8) {
-    const out = []; let grp = [], i = 0;
-    const s = bytesToLatin(u8).replace(/\s+/g, "");
-    let t = s.startsWith("<~") ? s.slice(2) : s;
-    const e = t.indexOf("~>"); if (e >= 0) t = t.slice(0, e);
-    for (i = 0; i < t.length; i++) {
-      const c = t[i];
-      if (c === "z" && !grp.length) { out.push(0, 0, 0, 0); continue; }
-      grp.push(t.charCodeAt(i) - 33);
-      if (grp.length === 5) {
-        let v = 0; for (const d of grp) v = v * 85 + d;
-        out.push((v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255); grp = [];
-      }
+    const n = u8.length, out = new Uint8Array(n * 4 + 8);
+    let i = 0, o = 0, cnt = 0, v = 0;
+    if (u8[0] === 60 && u8[1] === 126) i = 2;
+    for (; i < n; i++) {
+      const c = u8[i];
+      if (c === 126) break;                 // ~>
+      if (c <= 32) continue;                // whitespace
+      if (c === 122 && cnt === 0) { o += 4; continue; } // 'z' = four zero bytes (array is already zeroed)
+      v = v * 85 + (c - 33); cnt++;
+      if (cnt === 5) { out[o++] = (v >>> 24) & 255; out[o++] = (v >>> 16) & 255; out[o++] = (v >>> 8) & 255; out[o++] = v & 255; cnt = 0; v = 0; }
     }
-    if (grp.length > 1) {
-      const n = grp.length; while (grp.length < 5) grp.push(84);
-      let v = 0; for (const d of grp) v = v * 85 + d;
+    if (cnt > 1) {
+      for (let k = cnt; k < 5; k++) v = v * 85 + 84;
       const b4 = [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255];
-      for (let k = 0; k < n - 1; k++) out.push(b4[k]);
+      for (let k = 0; k < cnt - 1; k++) out[o++] = b4[k];
     }
-    return new Uint8Array(out);
+    return out.subarray(0, o);
   }
 
   // index a PDF: objects, the real page order (walk /Root → /Pages → /Kids), stream decoder
@@ -3566,6 +3563,113 @@
     return out;
   }
 
+  // ---------- images with transparency masks (walls / fills in many CAD exports are drawn this way) ----------
+  function pageXObjects(pdf, pageNum) {
+    const objs = pdf.objs, bodies = [objs[pageNum].body];
+    const rr = pdfInherit(pdf, pageNum, /\/Resources\s+(\d+)\s+\d+\s+R/);
+    if (rr && objs[+rr[1]]) bodies.push(objs[+rr[1]].body);
+    let dict = null;
+    for (const b of bodies) {
+      const im = /\/XObject\s*<<((?:[^<>]|<<[^<>]*>>)*)>>/.exec(b);
+      if (im) { dict = im[1]; break; }
+      const rm = /\/XObject\s+(\d+)\s+\d+\s+R/.exec(b);
+      if (rm && objs[+rm[1]]) { dict = objs[+rm[1]].body; break; }
+    }
+    const out = {};
+    if (dict) for (const m of dict.matchAll(/\/([^\s/<>\[\]()]+)\s+(\d+)\s+\d+\s+R/g)) out[m[1]] = +m[2];
+    return out;
+  }
+  function pdfImgHead(pdf, num) {
+    const o = pdf.objs[num]; if (!o) return null;
+    const si = o.body.indexOf("stream");
+    const hdr = si < 0 ? o.body : o.body.slice(0, si);
+    if (!/\/Subtype\s*\/Image/.test(hdr)) return null;
+    const gi = (re) => { const x = re.exec(hdr); return x ? x[1] : null; };
+    const fm = /\/Filter\s*(\[[^\]]*\]|\/\w+)/.exec(hdr);
+    return {
+      w: +gi(/\/Width\s+(\d+)/), h: +gi(/\/Height\s+(\d+)/), bpc: +(gi(/\/BitsPerComponent\s+(\d+)/) || 8),
+      cs: gi(/\/ColorSpace\s*\/(\w+)/), stencil: /\/ImageMask\s+true/.test(hdr),
+      smask: (/\/SMask\s+(\d+)\s+\d+\s+R/.exec(hdr) || [])[1] ? +/\/SMask\s+(\d+)\s+\d+\s+R/.exec(hdr)[1] : null,
+      filters: fm ? (fm[1].match(/\/(\w+)/g) || []).map((x) => x.slice(1)) : [],
+    };
+  }
+  // an image XObject (+ its /SMask as alpha): {canvas, x, y, w, h} where x,y,w,h place the canvas inside the image's
+  // unit square (top-left origin). Only the part of the mask that is not fully transparent is built. Null if undecodable.
+  async function pdfImageCanvas(pdf, num) {
+    const hd = pdfImgHead(pdf, num);
+    if (!hd || hd.stencil || !hd.w || !hd.h) return null;
+    const data = await pdf.stream(num);
+    if (!data) return null;
+    let mask = null, mw = hd.w, mh = hd.h;
+    if (hd.smask != null) {
+      const m0 = pdfImgHead(pdf, hd.smask);
+      if (m0 && m0.bpc === 8 && (!m0.cs || m0.cs === "DeviceGray") && !m0.filters.includes("DCTDecode")) {
+        const md = await pdf.stream(hd.smask);
+        if (md && md.length >= m0.w * m0.h) { mask = md; mw = m0.w; mh = m0.h; }
+      }
+    }
+    // bounding box of the visible part of the mask
+    let x0 = 0, y0 = 0, x1 = mw, y1 = mh;
+    if (mask) {
+      x0 = mw; y0 = mh; x1 = 0; y1 = 0;
+      for (let y = 0; y < mh; y++) {
+        const row = y * mw; let first = -1, last = -1;
+        for (let x = 0; x < mw; x++) if (mask[row + x]) { first = x; break; }
+        if (first < 0) continue;
+        for (let x = mw - 1; x >= first; x--) if (mask[row + x]) { last = x; break; }
+        if (first < x0) x0 = first; if (last + 1 > x1) x1 = last + 1;
+        if (y < y0) y0 = y; if (y + 1 > y1) y1 = y + 1;
+      }
+      if (x1 <= x0 || y1 <= y0) return { canvas: null };
+    }
+    const bw = x1 - x0, bh = y1 - y0;
+    const c = document.createElement("canvas"); c.width = bw; c.height = bh;
+    const g = c.getContext("2d", { willReadFrequently: true });
+    const kx = hd.w / mw, ky = hd.h / mh;      // colour image may differ in size from the mask
+    if (mask && hd.filters.includes("DCTDecode") && data.length < 4000) {
+      // a tiny JPEG behind a big mask is just one flat colour: paint colour + alpha in a single pass
+      const bmp = await createImageBitmap(new Blob([data], { type: "image/jpeg" }));
+      const t1 = document.createElement("canvas"); t1.width = 1; t1.height = 1;
+      const tg = t1.getContext("2d", { willReadFrequently: true });
+      tg.drawImage(bmp, 0, 0, 1, 1);
+      const px = tg.getImageData(0, 0, 1, 1).data;
+      const base = px[0] | (px[1] << 8) | (px[2] << 16);
+      const id = new ImageData(bw, bh), d32 = new Uint32Array(id.data.buffer);
+      for (let y = 0; y < bh; y++) {
+        const mrow = (y0 + y) * mw + x0, drow = y * bw;
+        for (let x = 0; x < bw; x++) d32[drow + x] = (base | (mask[mrow + x] << 24)) >>> 0;
+      }
+      g.putImageData(id, 0, 0);
+      return { canvas: c, x: x0 / mw, y: y0 / mh, w: bw / mw, h: bh / mh };
+    }
+    if (hd.filters.includes("DCTDecode")) {
+      const bmp = await createImageBitmap(new Blob([data], { type: "image/jpeg" }));
+      g.drawImage(bmp, x0 * kx, y0 * ky, bw * kx, bh * ky, 0, 0, bw, bh);
+    } else if (hd.bpc === 8 && (hd.cs === "DeviceRGB" || hd.cs === "DeviceGray")) {
+      const nc = hd.cs === "DeviceRGB" ? 3 : 1;
+      if (data.length < hd.w * hd.h * nc) return null;
+      const t = document.createElement("canvas"); t.width = hd.w; t.height = hd.h;
+      const tg = t.getContext("2d"), id = tg.createImageData(hd.w, hd.h);
+      for (let i = 0, n = hd.w * hd.h; i < n; i++) {
+        const p = i * 4;
+        if (nc === 3) { id.data[p] = data[i * 3]; id.data[p + 1] = data[i * 3 + 1]; id.data[p + 2] = data[i * 3 + 2]; }
+        else id.data[p] = id.data[p + 1] = id.data[p + 2] = data[i];
+        id.data[p + 3] = 255;
+      }
+      tg.putImageData(id, 0, 0);
+      g.drawImage(t, x0 * kx, y0 * ky, bw * kx, bh * ky, 0, 0, bw, bh);
+    } else return null;
+    if (mask) {
+      const id = g.getImageData(0, 0, bw, bh), d = id.data;
+      for (let y = 0; y < bh; y++) {
+        const mrow = (y0 + y) * mw + x0, drow = y * bw * 4;
+        for (let x = 0; x < bw; x++) d[drow + x * 4 + 3] = mask[mrow + x];
+      }
+      g.putImageData(id, 0, 0);
+    }
+    return { canvas: c, x: x0 / mw, y: y0 / mh, w: bw / mw, h: bh / mh };
+  }
+
   // draw one page's vector content. maxPx = longest side of the result.
   async function renderVectorPage(pdf, pageNum, maxPx, opts) {
     const objs = pdf.objs;
@@ -3610,6 +3714,7 @@
     const toks = tokenizePdf(content);
     // ---- text state ----
     const fonts = (opts && opts.text === false) ? null : await loadPdfFonts(pdf, pageNum).catch(() => ({}));
+    const xobjs = (opts && opts.text === false) ? null : pageXObjects(pdf, pageNum);
     let Tm = [1, 0, 0, 1, 0, 0], Tlm = [1, 0, 0, 1, 0, 0], Tc = 0, Tw = 0, Th = 1, TLd = 0, Trise = 0, Tmode = 0, curFont = null, fsz = 0;
     const mul = (A, B) => [A[0] * B[0] + A[1] * B[2], A[0] * B[1] + A[1] * B[3], A[2] * B[0] + A[3] * B[2], A[2] * B[1] + A[3] * B[3], A[4] * B[0] + A[5] * B[2] + B[4], A[4] * B[1] + A[5] * B[3] + B[5]];
     const measCache = new Map();
@@ -3728,6 +3833,23 @@
         case "h": g.closePath(); break;
         case "S": case "s": case "f": case "F": case "f*": case "B": case "B*": case "b": case "b*": case "n":
           endPath(o); break;
+        case "Do": {
+          const nm = vals[vals.length - 1];
+          if (xobjs && typeof nm === "string" && xobjs[nm] != null) {
+            try {
+              const ic = await pdfImageCanvas(pdf, xobjs[nm]);
+              if (ic && ic.canvas) {
+                g.save();
+                g.transform(1, 0, 0, -1, 0, 1);   // PDF images are one unit square, top row at y = 1
+                g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "low";   // masks are hard-edged; "high" is very slow on big ones
+                g.drawImage(ic.canvas, ic.x, ic.y, ic.w, ic.h);
+                g.restore();
+                drew++;
+              }
+            } catch (e) { console.warn("pdf image failed", e); }
+          }
+          break;
+        }
         case "W": clipPending = "nz"; break;
         case "W*": clipPending = "*"; break;
         case "BT": Tm = [1, 0, 0, 1, 0, 0]; Tlm = [1, 0, 0, 1, 0, 0]; break;
@@ -4560,7 +4682,7 @@
   })();
 
   if (location.hostname === "localhost" || location.protocol === "file:") {
-    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize, loadFile, openPdf, pdfPageBitmap, renderVectorPage, gotoPdfPage, loadPdfFonts, renderPlanPage, planToPdf, runPlanExport, renderFullCanvas, rotatePlan, applyPaperScale, setPdfInfo };
+    window.__FB = { state, S, Wld, dist, setMode, recomputeScale, closeDraft, finishLine, finishCount, detectRooms, drawPopCrop, polyMetrics, polyLen, render, renderPanel, undo, redo, pushHistory, handleRectClick, handleMeasureClick, handleLineClick, handleCountClick, paintTotals, placeByLength, totals, spaceCost, rateOf, buildReport, buildCsv, snap, snapEdge, alignSnap, resolvePlace, previewSnap, updateHud, updateDrawbar, activeDraftInfo, undoDraftPoint, clearActiveDraft, openPop, setView, syncAppBar, updateAppShell, updateSteps, setUnits, fit, resize, loadFile, openPdf, pdfPageBitmap, renderVectorPage, gotoPdfPage, loadPdfFonts, renderPlanPage, planToPdf, runPlanExport, renderFullCanvas, rotatePlan, applyPaperScale, setPdfInfo, pdfImageCanvas, pageXObjects };
   }
 })();
 </script>
