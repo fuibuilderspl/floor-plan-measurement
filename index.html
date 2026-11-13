@@ -3784,7 +3784,7 @@
     }
 
     const vals = [];
-    const minLw = 0.35 / s;
+    const minLw = Math.max(1.2, maxPx / 1500) / s; // a "0 width" hairline is drawn about 1 screen pixel wide by PDF viewers
     let clipPending = null, inText = false, drew = 0;
     const num = (k) => vals[vals.length - k];
     const col = (a) => a.length >= 4
