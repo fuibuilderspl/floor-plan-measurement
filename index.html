@@ -3389,7 +3389,7 @@
     const pdf = { bytes, latin, objs, pages: [] };
 
     pdf.stream = async (num) => {
-      const o = objs[num]; if (!o) return null;
+      const o = objs[num]; if (!o || o.start < 0) return null; // objects inside an object stream have no stream of their own
       const si = latin.indexOf("stream", o.start);
       if (si < 0 || si > o.end) return null;
       let s = si + 6;
@@ -3416,6 +3416,23 @@
       }
       return data;
     };
+
+    // PDF 1.5+: many objects (fonts, pages, resources…) live inside compressed /ObjStm streams — unpack them
+    for (const k of Object.keys(objs)) {
+      const o = objs[k];
+      if (o.start < 0 || !/\/Type\s*\/ObjStm/.test(o.body.slice(0, 600))) continue;
+      const nm = /\/N\s+(\d+)/.exec(o.body), fm = /\/First\s+(\d+)/.exec(o.body);
+      if (!nm || !fm) continue;
+      let data; try { data = await pdf.stream(+k); } catch (e) { data = null; }
+      if (!data) continue;
+      const text = bytesToLatin(data), first = +fm[1], cnt = +nm[1];
+      const hdrNums = (text.slice(0, first).match(/\d+/g) || []).map(Number);
+      for (let i = 0; i < cnt && 2 * i + 1 < hdrNums.length; i++) {
+        const num = hdrNums[2 * i], off = hdrNums[2 * i + 1];
+        const end = 2 * i + 3 < hdrNums.length ? hdrNums[2 * i + 3] : text.length - first;
+        if (!objs[num] || objs[num].start < 0) objs[num] = { start: -1, end: -1, body: text.slice(first + off, first + end) };
+      }
+    }
 
     // page order from the active catalog (last /Root in the file = newest revision)
     const pageSet = [];
@@ -3519,7 +3536,7 @@
     const fb = pdf.objs[n].body;
     const sub = ((/\/Subtype\s*\/(\w+)/.exec(fb)) || [])[1] || "";
     const bm = /\/BaseFont\s*\/([^\s/<>\[\]()]+)/.exec(fb);
-    const f = { cid: sub === "Type0", uni: new Map(), widths: new Map(), dw: 1000, css: fontCss(bm ? bm[1] : ""), diff: null };
+    const f = { cid: sub === "Type0" || /\/Subtype\s*\/Type0/.test(fb) || /\/DescendantFonts/.test(fb), uni: new Map(), widths: new Map(), dw: 1000, css: fontCss(bm ? bm[1] : ""), diff: null };
     const tu = /\/ToUnicode\s+(\d+)\s+\d+\s+R/.exec(fb);
     if (tu) { const st = await pdf.stream(+tu[1]); if (st) f.uni = parseToUnicode(bytesToLatin(st)); }
     if (f.cid) {
